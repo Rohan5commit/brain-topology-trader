@@ -3,14 +3,16 @@ import time
 import logging
 import requests
 from itertools import cycle
-from typing import Any
 
 import pandas as pd
+import yfinance as yf
 
 log = logging.getLogger(__name__)
 
-_RETRY_WAIT = 2     # seconds between retries
+_RETRY_WAIT = 2
 _MAX_RETRIES = 3
+
+_MACRO_TICKERS = ["^VIX", "^TNX", "^IRX", "SPY", "QQQ"]
 
 
 def _get(url: str, params: dict, retries: int = _MAX_RETRIES) -> dict:
@@ -28,23 +30,20 @@ def _get(url: str, params: dict, retries: int = _MAX_RETRIES) -> dict:
 
 
 class DataIngestor:
-    """Fetches OHLCV, macro, and sentiment data."""
+    """Fetches OHLCV, macro (yfinance), and sentiment data."""
 
     def __init__(self) -> None:
-        keys = [
-            os.environ.get(f"TWELVE_DATA_KEY_{i}", "") for i in range(1, 9)
-        ]
+        keys = [os.environ.get(f"TWELVE_DATA_KEY_{i}", "") for i in range(1, 9)]
         keys = [k for k in keys if k]
         if not keys:
             raise RuntimeError("No Twelve Data keys found in environment")
         self._key_pool = cycle(keys)
-        self._fred_key = os.environ["FRED_API_KEY"]
-        self._finnhub_key = os.environ["FINNHUB_API_KEY"]
+        self._finnhub_key = os.environ.get("FINNHUB_API_KEY", "")
 
     def _next_key(self) -> str:
         return next(self._key_pool)
 
-    # ── OHLCV ────────────────────────────────────────────────────────────────
+    # ── OHLCV (Twelve Data) ──────────────────────────────────────────────────
 
     def _fetch_ohlcv_one(self, ticker: str, outputsize: int = 60) -> pd.DataFrame | None:
         url = "https://api.twelvedata.com/time_series"
@@ -69,7 +68,6 @@ class DataIngestor:
 
     def fetch_ohlcv_all(self, tickers: list[str], outputsize: int = 60) -> dict[str, pd.DataFrame]:
         results: dict[str, pd.DataFrame] = {}
-        # Twelve Data free tier: ~800 calls/day per key; batch one ticker per call
         for i, ticker in enumerate(tickers):
             try:
                 df = self._fetch_ohlcv_one(ticker, outputsize)
@@ -77,14 +75,12 @@ class DataIngestor:
                     results[ticker] = df
             except Exception as exc:
                 log.warning("OHLCV fetch failed for %s: %s", ticker, exc)
-            # Polite rate-limiting: ~1 req/s across keys
             if i % 8 == 7:
                 time.sleep(1)
         log.info("OHLCV: fetched %d/%d tickers", len(results), len(tickers))
         return results
 
     def fetch_closing_prices(self, tickers: list[str]) -> dict[str, float]:
-        """Return latest close price per ticker (lightweight)."""
         prices: dict[str, float] = {}
         for ticker in tickers:
             try:
@@ -95,65 +91,69 @@ class DataIngestor:
                 log.debug("Close fetch failed %s: %s", ticker, exc)
         return prices
 
-    # ── Macro (FRED) ─────────────────────────────────────────────────────────
-
-    def _fred_series(self, series_id: str, limit: int = 30) -> pd.Series:
-        url = "https://api.stlouisfed.org/fred/series/observations"
-        params = {
-            "series_id": series_id,
-            "api_key": self._fred_key,
-            "file_type": "json",
-            "limit": limit,
-            "sort_order": "desc",
-        }
-        data = _get(url, params)
-        obs = data.get("observations", [])
-        if not obs:
-            return pd.Series(dtype=float)
-        s = pd.Series(
-            {o["date"]: float(o["value"]) for o in obs if o["value"] != "."},
-            name=series_id,
-        )
-        return s.sort_index()
+    # ── Macro (yfinance — no API key) ────────────────────────────────────────
 
     def fetch_macro(self) -> dict[str, float]:
-        macro: dict[str, float] = {}
+        """
+        Fetch macro via yfinance:
+          ^VIX  → VIX level
+          ^TNX  → 10Y Treasury yield
+          ^IRX  → 2Y Treasury yield (13-week, closest proxy)
+          SPY   → S&P 500 1-day return (market breadth)
+          QQQ   → NASDAQ 1-day return (tech breadth)
+
+        yield_curve_slope = ^TNX close - ^IRX close
+        """
+        defaults = {"vix": 20.0, "yield_curve_slope": 0.5, "spy_1d_return": 0.0}
         try:
-            vix = self._fred_series("VIXCLS")
-            macro["vix"] = float(vix.iloc[-1]) if not vix.empty else 20.0
-        except Exception:
-            macro["vix"] = 20.0
-        try:
-            t10 = self._fred_series("DGS10")
-            t2 = self._fred_series("DGS2")
-            macro["yield_curve_slope"] = float(t10.iloc[-1] - t2.iloc[-1]) if (not t10.empty and not t2.empty) else 0.0
-        except Exception:
-            macro["yield_curve_slope"] = 0.0
-        try:
-            ff = self._fred_series("DFF")
-            macro["fed_funds_rate"] = float(ff.iloc[-1]) if not ff.empty else 5.0
-        except Exception:
-            macro["fed_funds_rate"] = 5.0
-        log.info("Macro: vix=%.2f yc=%.3f ff=%.2f", macro["vix"], macro["yield_curve_slope"], macro["fed_funds_rate"])
+            raw = yf.download(
+                _MACRO_TICKERS,
+                period="5d",
+                interval="1d",
+                auto_adjust=True,
+                progress=False,
+            )
+            closes = raw["Close"] if isinstance(raw.columns, pd.MultiIndex) else raw
+
+            def _last(col: str) -> float:
+                s = closes[col].dropna()
+                return float(s.iloc[-1]) if not s.empty else float("nan")
+
+            vix = _last("^VIX")
+            tnx = _last("^TNX")
+            irx = _last("^IRX")
+            spy_ret = float(closes["SPY"].pct_change().dropna().iloc[-1]) if "SPY" in closes else 0.0
+
+            macro = {
+                "vix": vix if not (vix != vix) else 20.0,
+                "yield_curve_slope": (tnx - irx) if not ((tnx != tnx) or (irx != irx)) else 0.5,
+                "spy_1d_return": spy_ret,
+            }
+        except Exception as exc:
+            log.warning("Macro yfinance fetch failed: %s — using defaults", exc)
+            macro = defaults
+
+        log.info("Macro: vix=%.2f yc_slope=%.3f spy_1d=%.4f",
+                 macro["vix"], macro["yield_curve_slope"], macro["spy_1d_return"])
         return macro
 
     # ── Sentiment (Finnhub) ──────────────────────────────────────────────────
 
     def fetch_sentiment(self, tickers: list[str]) -> dict[str, float]:
-        """Return 3-day rolling avg news sentiment score per ticker."""
-        import finnhub
-        client = finnhub.Client(api_key=self._finnhub_key)
         scores: dict[str, float] = {}
-        for ticker in tickers:
-            try:
-                news = client.company_news(ticker, _from="2020-01-01", to="2099-01-01")
-                if news:
-                    # Use last 3 items' sentiment proxy (headline length as stub)
-                    # Finnhub free tier doesn't give numeric sentiment; use 0.0 default
+        if not self._finnhub_key:
+            return {t: 0.0 for t in tickers}
+        try:
+            import finnhub
+            client = finnhub.Client(api_key=self._finnhub_key)
+            for ticker in tickers:
+                try:
+                    client.company_news(ticker, _from="2020-01-01", to="2099-01-01")
                     scores[ticker] = 0.0
-                else:
+                except Exception:
                     scores[ticker] = 0.0
-            except Exception:
-                scores[ticker] = 0.0
-            time.sleep(0.05)  # stay under free-tier rate limit
+                time.sleep(0.05)
+        except Exception as exc:
+            log.warning("Finnhub client error: %s", exc)
+            scores = {t: 0.0 for t in tickers}
         return scores
