@@ -1,0 +1,45 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+dist/
+*.egg-info/
+.installed.packages
+*.egg
+
+# Virtual environments
+.venv/
+venv/
+env/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Modal
+.modal/
+
+# Secrets / env
+.env
+*.env
+secrets.json
+
+# Data / model artifacts (stored in Modal Volume, not git)
+*.parquet
+*.pt
+*.pkl
+*.h5
+/data/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log
+logs/
