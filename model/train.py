@@ -1,6 +1,8 @@
 """One-time historical supervised training (25 years, 3-class labels)."""
 import logging
 
+logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(name)s — %(message)s")
+
 import numpy as np
 import pandas as pd
 import torch
