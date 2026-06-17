@@ -1,8 +1,8 @@
-"""NCP trading model: LTC with AutoNCP wiring + per-stock embedding."""
+"""NCP trading model: CfC (Closed-form CfC) with AutoNCP wiring + per-stock embedding."""
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from ncps.torch import LTC
+from ncps.torch import CfC
 from ncps.wirings import AutoNCP
 
 
@@ -34,8 +34,8 @@ class NCPTradingModel(nn.Module):
             output_size=ncp_output_size,
             sparsity_level=ncp_sparsity,
         )
-        # LTC input_size = feature_dim + embedding_dim; wiring passed as units arg (ncps 1.0+)
-        self.ltc = LTC(input_size, wiring, batch_first=True)
+        # CfC: closed-form approximation of LTC — same wiring, ~20-50x faster (no ODE solver)
+        self.ltc = CfC(input_size, wiring, batch_first=True)
 
     def forward(
         self,
