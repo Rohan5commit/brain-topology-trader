@@ -1,4 +1,4 @@
-"""One-time historical supervised training (25 years, 3-class labels)."""
+"""One-time historical supervised training (25 years, 5-day labels, cross-sectional features)."""
 import logging
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(name)s — %(message)s")
@@ -16,13 +16,13 @@ from model.ncp_model import NCPTradingModel
 log = logging.getLogger(__name__)
 
 
-def _next_day_label(close_series: pd.Series) -> pd.Series:
-    """3-class label based on next-day return: 0=buy(>+0.5%), 1=hold, 2=sell(<-0.5%)."""
-    ret = close_series.pct_change(1).shift(-1)
+def _5day_label(close_series: pd.Series) -> pd.Series:
+    """3-class label based on 5-day forward return: 0=buy(>+1%), 1=hold, 2=sell(<-1%)."""
+    ret = close_series.pct_change(5).shift(-5)
     labels = pd.Series(1, index=close_series.index, dtype=np.int64)
-    labels[ret > 0.005] = 0
-    labels[ret < -0.005] = 2
-    labels[ret.isna()] = -1  # last row — exclude
+    labels[ret > 0.01] = 0
+    labels[ret < -0.01] = 2
+    labels[ret.isna()] = -1
     return labels
 
 
@@ -39,7 +39,7 @@ class HistoricalTrainer:
         device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         log.info("Device: %s | tickers: %d", device, len(tickers))
 
-        # ── Fetch 25 years of macro (yfinance) — one call ───────────────────
+        # ── Fetch macro once ─────────────────────────────────────────────────
         log.info("Fetching macro history (^VIX, ^TNX, ^IRX, SPY)…")
         macro_df = None
         try:
@@ -48,11 +48,7 @@ class HistoricalTrainer:
                 start=start_date, end=end_date,
                 interval="1d", auto_adjust=True, progress=False,
             )
-            # yfinance returns MultiIndex columns; "Close" is the price level
-            if isinstance(macro_raw.columns, pd.MultiIndex):
-                mc = macro_raw["Close"]
-            else:
-                mc = macro_raw
+            mc = macro_raw["Close"] if isinstance(macro_raw.columns, pd.MultiIndex) else macro_raw
             mc.index = pd.to_datetime(mc.index).normalize()
             mc = mc.rename(columns={"^VIX": "vix"})
             mc["yield_curve_slope"] = mc["^TNX"] - mc["^IRX"]
@@ -60,28 +56,27 @@ class HistoricalTrainer:
             macro_df = mc[["vix", "yield_curve_slope", "spy_1d_return"]].ffill().fillna(0.0)
             log.info("Macro loaded: %d rows", len(macro_df))
         except Exception as exc:
-            log.warning("Macro history fetch failed: %s — using stubs", exc)
+            log.warning("Macro fetch failed: %s — using stubs", exc)
 
-        # ── Fetch price history in batches of 100 ───────────────────────────
-        log.info("Fetching 25-year OHLCV via yfinance (batched)…")
+        # Precompute SPY 3-day cumulative return for sentiment proxy
+        spy_3d_cum = None
+        if macro_df is not None:
+            spy_3d_cum = macro_df["spy_1d_return"].rolling(3).sum().fillna(0.0)
+
+        # ── Pass 1: download all tickers, build per-ticker feat_dfs ─────────
+        log.info("Pass 1: downloading OHLCV and building features…")
         engineer = FeatureEngineer()
-        all_X: list[np.ndarray] = []
-        all_y: list[int] = []
-        all_idx: list[int] = []
+        all_feat_dfs: dict[str, pd.DataFrame] = {}
+        all_close: dict[str, pd.Series] = {}
         ticker_to_idx = {t: i for i, t in enumerate(tickers)}
 
-        batch_size = 100
-        for batch_start in range(0, len(tickers), batch_size):
-            batch = tickers[batch_start: batch_start + batch_size]
-            log.info(
-                "Downloading batch %d–%d / %d tickers",
-                batch_start + 1, batch_start + len(batch), len(tickers),
-            )
+        for batch_start in range(0, len(tickers), 100):
+            batch = tickers[batch_start: batch_start + 100]
+            log.info("Downloading batch %d–%d / %d", batch_start + 1, batch_start + len(batch), len(tickers))
             try:
                 raw = yf.download(
                     batch, start=start_date, end=end_date,
-                    interval="1d", auto_adjust=True,
-                    group_by="ticker", progress=False,
+                    interval="1d", auto_adjust=True, group_by="ticker", progress=False,
                 )
             except Exception as exc:
                 log.warning("Batch download failed: %s", exc)
@@ -89,11 +84,9 @@ class HistoricalTrainer:
 
             for ticker in batch:
                 try:
-                    # Extract per-ticker DataFrame
                     if len(batch) == 1:
                         df = raw.copy()
                     elif isinstance(raw.columns, pd.MultiIndex):
-                        # yfinance 1.x: level 0 = ticker, level 1 = field
                         if ticker in raw.columns.get_level_values(0):
                             df = raw[ticker].copy()
                         elif ticker in raw.columns.get_level_values(1):
@@ -105,16 +98,13 @@ class HistoricalTrainer:
 
                     df = df.rename(columns=str.lower).dropna(how="all")
                     df.index = pd.to_datetime(df.index).normalize()
-                    if len(df) < config.SEQUENCE_LENGTH + 25:
+                    if len(df) < config.SEQUENCE_LENGTH + config.RETURN_HORIZON + 5:
                         continue
 
-                    # ── O(n) feature computation ─────────────────────────────
-                    # Call _stock_features ONCE per ticker (not per-day)
                     feat_df = engineer._stock_features(df)
-                    if feat_df is None or len(feat_df) < config.SEQUENCE_LENGTH + 2:
+                    if feat_df is None or len(feat_df) < config.SEQUENCE_LENGTH + config.RETURN_HORIZON:
                         continue
 
-                    # Align daily macro values by date (vectorized join)
                     if macro_df is not None:
                         aligned = macro_df.reindex(feat_df.index, method="ffill")
                         feat_df["vix"] = aligned["vix"].fillna(20.0).values
@@ -125,40 +115,87 @@ class HistoricalTrainer:
                         feat_df["yield_curve_slope"] = 0.5
                         feat_df["spy_1d_return"] = 0.0
 
-                    feat_df["sentiment_3d"] = 0.0
-                    feat_df["momentum_rank"] = 0.5  # cross-sectional rank unavailable for historical
-
-                    # Build labels aligned to feat_df index
-                    label_series = _next_day_label(df["close"]).reindex(feat_df.index)
-
-                    feat_arr = feat_df[FEATURE_NAMES].values.astype(np.float32)
-                    feat_arr = np.nan_to_num(feat_arr, nan=0.0, posinf=0.0, neginf=0.0)
-                    label_arr = label_series.values
-
-                    # Build sliding windows
-                    ticker_idx = ticker_to_idx[ticker]
-                    for i in range(config.SEQUENCE_LENGTH, len(feat_arr) - 1):
-                        label = int(label_arr[i]) if not np.isnan(label_arr[i]) else -1
-                        if label not in (0, 1, 2):
-                            continue
-                        x_seq = feat_arr[i - config.SEQUENCE_LENGTH: i]
-                        all_X.append(x_seq)
-                        all_y.append(label)
-                        all_idx.append(ticker_idx)
+                    all_feat_dfs[ticker] = feat_df
+                    all_close[ticker] = df["close"]
 
                 except Exception as exc:
                     log.warning("Skipping %s: %s", ticker, exc)
 
-            log.info("Samples so far: %d", len(all_X))
+            log.info("Feature DFs collected: %d tickers so far", len(all_feat_dfs))
+
+        if not all_feat_dfs:
+            raise RuntimeError("No feature data collected")
+
+        log.info("Pass 1 done: %d tickers with features", len(all_feat_dfs))
+
+        # ── Compute daily cross-sectional momentum rank ──────────────────────
+        log.info("Computing daily cross-sectional momentum rank panel…")
+        returns_panel = pd.DataFrame({t: fd["returns_20d"] for t, fd in all_feat_dfs.items()})
+        rank_panel = returns_panel.rank(axis=1, pct=True).fillna(0.5)
+        log.info("Rank panel: %d dates × %d tickers", len(rank_panel), len(rank_panel.columns))
+
+        # ── Pass 2: fill cross-sectional features + build samples ────────────
+        log.info("Pass 2: building training samples…")
+        all_X: list[np.ndarray] = []
+        all_y: list[int] = []
+        all_idx: list[int] = []
+
+        for ticker, feat_df in all_feat_dfs.items():
+            try:
+                feat_df = feat_df.copy()
+
+                # Real cross-sectional momentum rank
+                if ticker in rank_panel.columns:
+                    feat_df["momentum_rank"] = (
+                        rank_panel[ticker].reindex(feat_df.index).ffill().fillna(0.5).values
+                    )
+                else:
+                    feat_df["momentum_rank"] = 0.5
+
+                # Sentiment proxy: 3-day abnormal return vs SPY, normalised to [-1, 1]
+                stock_3d = feat_df["returns_1d"].rolling(3).sum().fillna(0.0)
+                if spy_3d_cum is not None:
+                    spy_aligned = spy_3d_cum.reindex(feat_df.index, method="ffill").fillna(0.0)
+                    abnormal = stock_3d - spy_aligned
+                else:
+                    abnormal = stock_3d
+                feat_df["sentiment_3d"] = abnormal.clip(-0.15, 0.15) / 0.15
+
+                # 5-day forward labels
+                close = all_close[ticker].reindex(feat_df.index)
+                label_arr = _5day_label(close).fillna(-1).astype(int).values
+
+                feat_arr = feat_df[FEATURE_NAMES].values.astype(np.float32)
+                feat_arr = np.nan_to_num(feat_arr, nan=0.0, posinf=0.0, neginf=0.0)
+
+                ticker_idx = ticker_to_idx.get(ticker, 0)
+                for i in range(config.SEQUENCE_LENGTH, len(feat_arr) - config.RETURN_HORIZON):
+                    label = int(label_arr[i])
+                    if label not in (0, 1, 2):
+                        continue
+                    all_X.append(feat_arr[i - config.SEQUENCE_LENGTH: i])
+                    all_y.append(label)
+                    all_idx.append(ticker_idx)
+
+            except Exception as exc:
+                log.warning("Skipping %s in pass 2: %s", ticker, exc)
 
         if not all_X:
             raise RuntimeError("No training samples generated")
 
         log.info("Total training samples: %d", len(all_X))
 
-        X = torch.FloatTensor(np.array(all_X))       # (N, seq_len, 17)
-        y = torch.LongTensor(all_y)                   # (N,)
-        idx_t = torch.LongTensor(all_idx)             # (N,)
+        # Weighted CrossEntropy — inverse frequency weights to fix class imbalance
+        y_np = np.array(all_y)
+        counts = np.bincount(y_np, minlength=3).astype(np.float32)
+        log.info("Class distribution — buy: %d | hold: %d | sell: %d", *counts.astype(int))
+        weights = 1.0 / counts.clip(min=1)
+        weights = weights / weights.mean()
+        log.info("Class weights — buy: %.3f | hold: %.3f | sell: %.3f", *weights)
+
+        X = torch.FloatTensor(np.array(all_X))
+        y = torch.LongTensor(all_y)
+        idx_t = torch.LongTensor(all_idx)
 
         dataset = TensorDataset(X, idx_t, y)
         loader = DataLoader(
@@ -177,17 +214,14 @@ class HistoricalTrainer:
         ).to(device)
 
         optimizer = torch.optim.Adam(model.parameters(), lr=config.LEARNING_RATE)
-        scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
-            optimizer, T_max=config.HISTORICAL_EPOCHS,
-        )
-        criterion = nn.CrossEntropyLoss()
+        scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=config.HISTORICAL_EPOCHS)
+        class_weights = torch.FloatTensor(weights).to(device)
+        criterion = nn.CrossEntropyLoss(weight=class_weights)
 
         # ── Training loop ────────────────────────────────────────────────────
         for epoch in range(config.HISTORICAL_EPOCHS):
             model.train()
-            total_loss = 0.0
-            correct = 0
-            n = 0
+            total_loss, correct, n = 0.0, 0, 0
             for xb, ib, yb in loader:
                 xb, ib, yb = xb.to(device), ib.to(device), yb.to(device)
                 optimizer.zero_grad()
