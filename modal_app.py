@@ -212,11 +212,10 @@ def update_weights():
 
 @app.function(
     image=image,
-    secrets=_secrets,
     volumes={"/data": vol},
     gpu="A100",
     timeout=86400,
-    memory=32768,
+    memory=65536,
 )
 def train_historical():
     """One-time historical training.  Run: modal run --detach modal_app.py::train_historical"""
