@@ -18,6 +18,8 @@ image = (
         "scikit-learn>=1.3.0",
         "yfinance>=0.2.36",
     ])
+    # Upload local source packages so `import config`, `import model.train`, etc. work in container
+    .add_local_python_source("config", "data", "model", "execution", "reward", "utils")
 )
 
 _secrets = [
@@ -26,13 +28,6 @@ _secrets = [
     modal.Secret.from_name("finnhub-secret"),
     modal.Secret.from_name("notify-secret"),
 ]
-
-# Mount all source .py files into /root so `import config`, `import model.train`, etc. work
-_src_mount = modal.Mount.from_local_dir(
-    local_path=".",
-    remote_path="/root",
-    condition=lambda path: path.endswith(".py") and ".git" not in path,
-)
 
 
 # ── Cron 1: disabled until Alpaca + SMTP are wired ──────────────────────────
@@ -45,7 +40,6 @@ _src_mount = modal.Mount.from_local_dir(
     memory=16384,
     gpu="T4",
     timeout=3600,
-    mounts=[_src_mount],
 )
 def run_inference_and_execute():
     """Inference + execution. Manually trigger: modal run modal_app.py::run_inference_and_execute"""
@@ -159,7 +153,6 @@ def run_inference_and_execute():
     volumes={"/data": vol},
     gpu="A10G",
     timeout=7200,
-    mounts=[_src_mount],
 )
 def update_weights():
     """EOD weight update. Manually trigger: modal run modal_app.py::update_weights"""
@@ -224,7 +217,6 @@ def update_weights():
     gpu="A10G",
     timeout=86400,
     memory=32768,
-    mounts=[_src_mount],
 )
 def train_historical():
     """One-time historical training.  Run: modal run --detach modal_app.py::train_historical"""
