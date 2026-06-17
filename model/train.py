@@ -181,7 +181,6 @@ class HistoricalTrainer:
             optimizer, T_max=config.HISTORICAL_EPOCHS,
         )
         criterion = nn.CrossEntropyLoss()
-        scaler = torch.cuda.amp.GradScaler() if device.type == "cuda" else None
 
         # ── Training loop ────────────────────────────────────────────────────
         for epoch in range(config.HISTORICAL_EPOCHS):
@@ -192,21 +191,11 @@ class HistoricalTrainer:
             for xb, ib, yb in loader:
                 xb, ib, yb = xb.to(device), ib.to(device), yb.to(device)
                 optimizer.zero_grad()
-                if scaler is not None:
-                    with torch.cuda.amp.autocast():
-                        probs = model(xb, ib)
-                        loss = criterion(probs, yb)
-                    scaler.scale(loss).backward()
-                    scaler.unscale_(optimizer)
-                    torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
-                    scaler.step(optimizer)
-                    scaler.update()
-                else:
-                    probs = model(xb, ib)
-                    loss = criterion(probs, yb)
-                    loss.backward()
-                    torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
-                    optimizer.step()
+                probs = model(xb, ib)
+                loss = criterion(probs, yb)
+                loss.backward()
+                torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
+                optimizer.step()
                 total_loss += loss.item() * len(yb)
                 correct += (probs.argmax(1) == yb).sum().item()
                 n += len(yb)
