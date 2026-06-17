@@ -214,7 +214,7 @@ def update_weights():
     image=image,
     secrets=_secrets,
     volumes={"/data": vol},
-    gpu="A10G",
+    gpu="A100",
     timeout=86400,
     memory=32768,
 )
@@ -231,11 +231,17 @@ def train_historical():
     log.info("=== Historical Training start %s ===", datetime.now(timezone.utc).isoformat())
     log.info("Period: %s → %s | tickers: %d", config.HISTORICAL_START, config.HISTORICAL_END, len(config.TICKER_UNIVERSE))
 
+    def _checkpoint(model, epoch):
+        torch.save(model.state_dict(), config.WEIGHTS_LATEST_PATH)
+        vol.commit()
+        log.info("Checkpoint saved after epoch %d → %s", epoch, config.WEIGHTS_LATEST_PATH)
+
     trainer = HistoricalTrainer()
     model = trainer.train(
         tickers=config.TICKER_UNIVERSE,
         start_date=config.HISTORICAL_START,
         end_date=config.HISTORICAL_END,
+        checkpoint_fn=_checkpoint,
     )
 
     torch.save(model.state_dict(), config.WEIGHTS_BASE_PATH)
