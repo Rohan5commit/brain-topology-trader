@@ -33,6 +33,8 @@ class HistoricalTrainer:
         start_date: str,
         end_date: str,
         checkpoint_fn=None,
+        start_epoch: int = 0,
+        weights_path: str = None,
     ) -> NCPTradingModel:
         import yfinance as yf
 
@@ -213,13 +215,19 @@ class HistoricalTrainer:
             embedding_dim=config.EMBEDDING_DIM,
         ).to(device)
 
+        if weights_path and start_epoch > 0:
+            model.load_state_dict(torch.load(weights_path, map_location=device))
+            log.info("Loaded checkpoint weights from %s (resuming epoch %d)", weights_path, start_epoch)
+
         optimizer = torch.optim.Adam(model.parameters(), lr=config.LEARNING_RATE)
-        scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=config.HISTORICAL_EPOCHS)
+        scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
+            optimizer, T_max=config.HISTORICAL_EPOCHS, last_epoch=start_epoch
+        )
         class_weights = torch.FloatTensor(weights).to(device)
         criterion = nn.CrossEntropyLoss(weight=class_weights)
 
         # ── Training loop ────────────────────────────────────────────────────
-        for epoch in range(config.HISTORICAL_EPOCHS):
+        for epoch in range(start_epoch, config.HISTORICAL_EPOCHS):
             model.train()
             total_loss, correct, n = 0.0, 0, 0
             for xb, ib, yb in loader:
