@@ -219,6 +219,7 @@ def update_weights():
 )
 def train_historical():
     """One-time historical training.  Run: modal run --detach modal_app.py::train_historical"""
+    import os
     import torch
     from datetime import datetime, timezone
 
@@ -230,8 +231,20 @@ def train_historical():
     log.info("=== Historical Training start %s ===", datetime.now(timezone.utc).isoformat())
     log.info("Period: %s → %s | tickers: %d", config.HISTORICAL_START, config.HISTORICAL_END, len(config.TICKER_UNIVERSE))
 
+    # Resume from checkpoint if available
+    _epoch_file = "/data/checkpoint_epoch.txt"
+    start_epoch = 0
+    weights_path = None
+    if os.path.exists(_epoch_file) and os.path.exists(config.WEIGHTS_LATEST_PATH):
+        with open(_epoch_file) as f:
+            start_epoch = int(f.read().strip())
+        weights_path = config.WEIGHTS_LATEST_PATH
+        log.info("Resuming from epoch %d, weights: %s", start_epoch, weights_path)
+
     def _checkpoint(model, epoch):
         torch.save(model.state_dict(), config.WEIGHTS_LATEST_PATH)
+        with open(_epoch_file, "w") as f:
+            f.write(str(epoch))
         vol.commit()
         log.info("Checkpoint saved after epoch %d → %s", epoch, config.WEIGHTS_LATEST_PATH)
 
@@ -241,6 +254,8 @@ def train_historical():
         start_date=config.HISTORICAL_START,
         end_date=config.HISTORICAL_END,
         checkpoint_fn=_checkpoint,
+        start_epoch=start_epoch,
+        weights_path=weights_path,
     )
 
     torch.save(model.state_dict(), config.WEIGHTS_BASE_PATH)
