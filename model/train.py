@@ -194,16 +194,14 @@ class HistoricalTrainer:
         weights = weights / weights.mean()
         log.info("Class weights — down: %.3f | up: %.3f", *weights)
 
-        X = torch.FloatTensor(np.array(all_X))
-        y = torch.LongTensor(all_y)
-        idx_t = torch.LongTensor(all_idx)
-        sec_t = torch.LongTensor(all_sector)
+        X = torch.FloatTensor(np.array(all_X)).to(device)
+        y = torch.LongTensor(all_y).to(device)
+        idx_t = torch.LongTensor(all_idx).to(device)
+        sec_t = torch.LongTensor(all_sector).to(device)
+        log.info("Dataset on %s — X: %.1f GB", device, X.element_size() * X.nelement() / 1e9)
 
         dataset = TensorDataset(X, idx_t, sec_t, y)
-        loader = DataLoader(
-            dataset, batch_size=config.BATCH_SIZE, shuffle=True,
-            num_workers=8, pin_memory=True, persistent_workers=True, prefetch_factor=2,
-        )
+        loader = DataLoader(dataset, batch_size=config.BATCH_SIZE, shuffle=True)
 
         # ── Model ────────────────────────────────────────────────────────────
         model = NCPTradingModel(
@@ -233,7 +231,6 @@ class HistoricalTrainer:
             model.train()
             total_loss, correct, n = 0.0, 0, 0
             for xb, ib, sb, yb in loader:
-                xb, ib, sb, yb = xb.to(device), ib.to(device), sb.to(device), yb.to(device)
                 optimizer.zero_grad()
                 probs = model(xb, ib, sb)
                 loss = criterion(probs, yb)
