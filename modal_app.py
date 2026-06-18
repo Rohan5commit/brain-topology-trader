@@ -70,14 +70,20 @@ def run_inference_and_execute():
     features = engineer.compute_features(ohlcv, macro, sentiment)
     log.info("Features ready for %d tickers", len(features))
 
+    import torch.nn.functional as F
+
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     model = NCPTradingModel(
         num_stocks=len(config.TICKER_UNIVERSE),
+        num_features=config.NUM_FEATURES,
         input_size=config.INPUT_SIZE,
         ncp_units=config.NCP_UNITS,
         ncp_output_size=config.NCP_OUTPUT_SIZE,
         ncp_sparsity=config.NCP_SPARSITY,
         embedding_dim=config.EMBEDDING_DIM,
+        num_sectors=config.NUM_SECTORS,
+        sector_embedding_dim=config.SECTOR_EMBEDDING_DIM,
+        dropout=0.0,
     ).to(device)
 
     weights = config.WEIGHTS_LATEST_PATH
@@ -99,7 +105,9 @@ def run_inference_and_execute():
                 continue
             x = torch.FloatTensor(feat_seq[-config.SEQUENCE_LENGTH:]).unsqueeze(0).to(device)
             idx = torch.LongTensor([ticker_to_idx.get(ticker, 0)]).to(device)
-            probs = model(x, idx)
+            sec = torch.LongTensor([config.TICKER_SECTOR.get(ticker, 12)]).to(device)
+            logits = model(x, idx, sec)
+            probs = F.softmax(logits, dim=-1)
             raw_signals[ticker] = probs.squeeze(0).cpu().tolist()
 
     log.info("Inference complete: %d tickers", len(raw_signals))
@@ -188,11 +196,15 @@ def update_weights():
     device = torch.device("cuda")
     model = NCPTradingModel(
         num_stocks=len(config.TICKER_UNIVERSE),
+        num_features=config.NUM_FEATURES,
         input_size=config.INPUT_SIZE,
         ncp_units=config.NCP_UNITS,
         ncp_output_size=config.NCP_OUTPUT_SIZE,
         ncp_sparsity=config.NCP_SPARSITY,
         embedding_dim=config.EMBEDDING_DIM,
+        num_sectors=config.NUM_SECTORS,
+        sector_embedding_dim=config.SECTOR_EMBEDDING_DIM,
+        dropout=0.0,
     ).to(device)
 
     weights = config.WEIGHTS_LATEST_PATH
