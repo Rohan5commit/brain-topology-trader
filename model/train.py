@@ -206,6 +206,7 @@ class HistoricalTrainer:
         # ── Model ────────────────────────────────────────────────────────────
         model = NCPTradingModel(
             num_stocks=len(tickers),
+            num_features=config.NUM_FEATURES,
             input_size=config.INPUT_SIZE,
             ncp_units=config.NCP_UNITS,
             ncp_output_size=config.NCP_OUTPUT_SIZE,
@@ -213,20 +214,21 @@ class HistoricalTrainer:
             embedding_dim=config.EMBEDDING_DIM,
             num_sectors=config.NUM_SECTORS,
             sector_embedding_dim=config.SECTOR_EMBEDDING_DIM,
+            dropout=config.DROPOUT,
         ).to(device)
 
         if weights_path and start_epoch > 0:
             model.load_state_dict(torch.load(weights_path, map_location=device))
             log.info("Loaded checkpoint weights from %s (resuming epoch %d)", weights_path, start_epoch)
 
-        optimizer = torch.optim.Adam(model.parameters(), lr=config.LEARNING_RATE)
+        optimizer = torch.optim.AdamW(model.parameters(), lr=config.LEARNING_RATE, weight_decay=config.WEIGHT_DECAY)
         for pg in optimizer.param_groups:
             pg['initial_lr'] = config.LEARNING_RATE
         scheduler = torch.optim.lr_scheduler.CosineAnnealingWarmRestarts(
             optimizer, T_0=config.SGDR_T0, T_mult=config.SGDR_T_MULT, last_epoch=start_epoch - 1 if start_epoch > 0 else -1,
         )
         class_weights = torch.FloatTensor(weights).to(device)
-        criterion = nn.CrossEntropyLoss(weight=class_weights)
+        criterion = nn.CrossEntropyLoss(weight=class_weights, label_smoothing=config.LABEL_SMOOTHING)
 
         # ── Training loop ────────────────────────────────────────────────────
         for epoch in range(start_epoch, config.HISTORICAL_EPOCHS):
