@@ -12,6 +12,9 @@ INPUT_SIZE = NUM_FEATURES + EMBEDDING_DIM + SECTOR_EMBEDDING_DIM  # 57
 # Training
 LEARNING_RATE = 1e-4
 BATCH_SIZE = 8192
+WEIGHT_DECAY = 1e-4
+DROPOUT = 0.2
+LABEL_SMOOTHING = 0.1
 HISTORICAL_EPOCHS = 60       # v3: 60 epochs, 3 SGDR cycles (10+20+40 but capped)
 SGDR_T0 = 10                 # SGDR first cycle length
 SGDR_T_MULT = 2              # cycle length multiplier
