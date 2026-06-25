@@ -50,7 +50,7 @@ def run_inference_and_execute():
     import config
     from data.ingest import DataIngestor
     from data.features import FeatureEngineer
-    from model.ncp_model import NCPTradingModel
+    from model.ncp_model_v5 import NCPTradingModelV5 as NCPTradingModel
     from execution.signals import SignalProcessor
     from execution.sizing import KellySizer
     from execution.broker import AlpacaBroker
@@ -84,12 +84,14 @@ def run_inference_and_execute():
         embedding_dim=config.EMBEDDING_DIM,
         num_sectors=config.NUM_SECTORS,
         sector_embedding_dim=config.SECTOR_EMBEDDING_DIM,
+        cs_heads=4,
+        cs_dropout=0.1,
         dropout=0.0,
     )
 
     _seed_weight_paths = [
-        "/data/ncp_weights_base.pt",
-        "/data/ncp_weights_seed2.pt",
+        "/data/ncp_v5_seed1.pt",
+        "/data/ncp_v5_seed2.pt",
     ]
     ensemble_models = []
     for wp in _seed_weight_paths:
