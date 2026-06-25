@@ -90,8 +90,6 @@ def run_inference_and_execute():
     _seed_weight_paths = [
         "/data/ncp_weights_base.pt",
         "/data/ncp_weights_seed2.pt",
-        "/data/ncp_weights_seed3.pt",
-        "/data/ncp_weights_seed4.pt",
     ]
     ensemble_models = []
     for wp in _seed_weight_paths:
