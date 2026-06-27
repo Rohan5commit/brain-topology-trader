@@ -1,4 +1,4 @@
-"""Feature engineering: 25 features per stock per day.
+"""Feature engineering: 29 features per stock per day.
 
 Feature index reference
 -----------------------
@@ -24,9 +24,13 @@ Feature index reference
 19  volume_trend
 20  roc_60
 21  volatility_ratio
-22  earnings_surprise   — normalised EPS surprise %, clipped ±3 σ
-23  short_vol_ratio     — short volume / total volume, forward-filled
-24  pc_ratio            — put/call OI ratio (stock-level snapshot)
+22  earnings_surprise       — normalised EPS surprise %, clipped ±3 σ
+23  short_vol_ratio         — short volume fraction of total volume
+24  pc_ratio                — put/call OI ratio (stock-level snapshot)
+25  days_since_earnings_norm — calendar days since last earnings / 91, clipped [0,4]
+26  daily_range_norm        — (high-low)/ATR, intraday volatility signal
+27  vix_zscore_252          — VIX z-score over trailing 252 days (market regime)
+28  sector_rel_momentum     — stock 20d return minus sector avg 20d return
 """
 import logging
 import os
@@ -59,11 +63,15 @@ FEATURE_NAMES = [
     "volume_trend",        # 19  — vol MA20/MA60 ratio (institutional activity)
     "roc_60",              # 20  — 60-day momentum (intermediate trend)
     "volatility_ratio",    # 21  — current ATR vs 60-day avg (vol regime)
-    "earnings_surprise",   # 22  — normalised EPS surprise %, clipped ±3 σ
-    "short_vol_ratio",     # 23  — short volume fraction of total volume
-    "pc_ratio",            # 24  — put/call OI ratio (stock-level snapshot)
+    "earnings_surprise",        # 22  — normalised EPS surprise %, clipped ±3 σ
+    "short_vol_ratio",          # 23  — short volume fraction of total volume
+    "pc_ratio",                 # 24  — put/call OI ratio (stock-level snapshot)
+    "days_since_earnings_norm", # 25  — days since last earnings / 91, clipped [0,4]
+    "daily_range_norm",         # 26  — (high-low)/ATR, intraday vol signal
+    "vix_zscore_252",           # 27  — VIX z-score over 252 days
+    "sector_rel_momentum",      # 28  — stock 20d return minus sector avg 20d return
 ]
-assert len(FEATURE_NAMES) == 25
+assert len(FEATURE_NAMES) == 29
 
 # ── Alt-data file paths ───────────────────────────────────────────────────────
 _ALT_DATA_DIR = os.path.join(os.path.dirname(__file__), "..", "data", "alt_data")
@@ -87,11 +95,18 @@ def _load_parquet_safe(path: str, label: str) -> pd.DataFrame | None:
 
 
 class FeatureEngineer:
-    """Computes per-stock, per-day feature vectors (25 features).
+    """Computes per-stock, per-day feature vectors (29 features).
 
     Alt-data parquet files are loaded once at ``__init__`` time.  If any file
     is missing or unreadable the corresponding feature column is filled with
     its default value so the rest of the pipeline is unaffected.
+
+    Features 25-28 require additional context passed by the caller:
+      - ``sector_ret20`` (dict[str, float]): sector-average 20d return, keyed by
+        GICS sector int. Computed externally from the cross-sectional panel and
+        passed into ``_stock_features``.  Default 0.0 if missing.
+      - ``vix_series`` (pd.Series): full VIX daily history for computing the
+        252-day z-score.  Passed into ``_stock_features``.  Default 0.0 if missing.
 
     Alt-data contracts
     ------------------
@@ -102,10 +117,8 @@ class FeatureEngineer:
         ±3 σ inside this class.
 
     short_interest.parquet
-        Columns: ``ticker`` (str), ``date`` (datetime-like),
-        ``short_volume`` (float), ``total_volume`` (float).
-        Data is bi-monthly; it is forward-filled to daily frequency.
-        ``short_vol_ratio = short_volume / total_volume``, default 0.5.
+        Columns: ``ticker`` (str), ``short_vol_ratio`` (float).
+        Static per-ticker snapshot; ``short_vol_ratio`` clipped to [0, 1].
 
     options_snapshot.parquet
         Columns: ``ticker`` (str), ``pc_ratio`` (float).
@@ -173,15 +186,18 @@ class FeatureEngineer:
         ohlcv: dict[str, pd.DataFrame],
         macro: dict[str, float],
         sentiment: dict[str, float],
+        ticker_sector: dict[str, int] | None = None,
+        vix_series: pd.Series | None = None,
     ) -> dict[str, np.ndarray | None]:
-        """Return {ticker: ndarray(n_days, 25)} for all tickers with enough data."""
+        """Return {ticker: ndarray(n_days, 29)} for all tickers with enough data."""
+        import config as _cfg
 
         momentum_20d: dict[str, float] = {}
         stock_features: dict[str, pd.DataFrame] = {}
 
         for ticker, df in ohlcv.items():
             try:
-                feat = self._stock_features(df, ticker)
+                feat = self._stock_features(df, ticker, vix_series=vix_series)
                 if feat is not None and len(feat) >= 21:
                     stock_features[ticker] = feat
                     momentum_20d[ticker] = float(feat["returns_20d"].iloc[-1])
@@ -190,6 +206,15 @@ class FeatureEngineer:
 
         mom_series = pd.Series(momentum_20d)
         ranks = mom_series.rank(pct=True)
+
+        # Compute per-sector average 20d return for sector_rel_momentum
+        sector_ret20: dict[int, float] = {}
+        if ticker_sector is not None:
+            sector_rets: dict[int, list] = {}
+            for t, ret in momentum_20d.items():
+                s = ticker_sector.get(t, 12)
+                sector_rets.setdefault(s, []).append(ret)
+            sector_ret20 = {s: float(np.mean(v)) for s, v in sector_rets.items()}
 
         vix = macro.get("vix", 20.0)
         ycs = macro.get("yield_curve_slope", 0.5)
@@ -203,6 +228,13 @@ class FeatureEngineer:
             feat["spy_1d_return"] = spy_ret
             feat["sentiment_3d"] = sentiment.get(ticker, 0.0)
             feat["momentum_rank"] = float(ranks.get(ticker, 0.5))
+            # sector_rel_momentum: stock's last-row value was set per-ticker in _stock_features;
+            # here we patch it with the cross-sectional sector average (not available inside).
+            if ticker_sector is not None:
+                s = ticker_sector.get(ticker, 12)
+                sec_avg = sector_ret20.get(s, 0.0)
+                stock_ret20 = float(feat["returns_20d"].iloc[-1])
+                feat["sector_rel_momentum"] = stock_ret20 - sec_avg
             arr = feat[FEATURE_NAMES].values.astype(np.float32)
             arr = np.nan_to_num(arr, nan=0.0, posinf=0.0, neginf=0.0)
             result[ticker] = arr
@@ -210,7 +242,12 @@ class FeatureEngineer:
         log.info("Features assembled for %d tickers", len(result))
         return result
 
-    def _stock_features(self, df: pd.DataFrame, ticker: str = "") -> pd.DataFrame | None:
+    def _stock_features(
+        self,
+        df: pd.DataFrame,
+        ticker: str = "",
+        vix_series: pd.Series | None = None,
+    ) -> pd.DataFrame | None:
         if len(df) < 21:
             return None
         close = df["close"]
@@ -316,5 +353,45 @@ class FeatureEngineer:
         # pc_ratio (index 24)
         # Static per-ticker scalar.  Default: 1.0.
         feat["pc_ratio"] = self._pc_ratio.get(ticker, 1.0) if ticker else 1.0
+
+        # days_since_earnings_norm (index 25)
+        # Calendar days since last known earnings date, divided by 91 (one quarter),
+        # clipped to [0, 4].  Captures pre-earnings drift and PEAD decay.
+        feat["days_since_earnings_norm"] = 1.0  # default: neutral (one quarter ago)
+        if ticker and ticker in self._earnings:
+            earn_dates = self._earnings[ticker].index  # sorted DatetimeIndex
+            feat_dates_arr = feat.index
+            earn_arr = earn_dates.values
+            norms = []
+            for d in feat_dates_arr:
+                past = earn_arr[earn_arr <= d]
+                if len(past) == 0:
+                    norms.append(4.0)  # no history → max cap
+                else:
+                    days = (d - past[-1]).days
+                    norms.append(min(days / 91.0, 4.0))
+            feat["days_since_earnings_norm"] = norms
+
+        # daily_range_norm (index 26)
+        # (high - low) / ATR — normalised intraday range.  Captures intraday
+        # vol relative to the trailing regime; complements bollinger_width.
+        feat["daily_range_norm"] = ((high - low) / raw_atr.replace(0, 1)).clip(0, 5)
+
+        # vix_zscore_252 (index 27)
+        # VIX z-score over the trailing 252 trading days.
+        # Uses the vix_series passed by the walk-forward trainer (full history).
+        # If not available, falls back to 0.0 (filled by caller later).
+        feat["vix_zscore_252"] = 0.0
+        if vix_series is not None:
+            aligned_vix = vix_series.reindex(feat.index, method="ffill").fillna(20.0)
+            vix_mu = aligned_vix.rolling(252, min_periods=20).mean()
+            vix_std = aligned_vix.rolling(252, min_periods=20).std().replace(0, 1)
+            feat["vix_zscore_252"] = ((aligned_vix - vix_mu) / vix_std).clip(-3, 3).fillna(0.0).values
+
+        # sector_rel_momentum (index 28)
+        # Stock 20d return minus sector average 20d return.
+        # This column is a placeholder set to 0.0 here; compute_features() and the
+        # walk-forward trainer patch it with the real cross-sectional value.
+        feat["sector_rel_momentum"] = 0.0
 
         return feat.dropna(subset=["returns_20d"])

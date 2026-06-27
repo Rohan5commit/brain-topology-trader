@@ -121,8 +121,8 @@ def run_inference_and_execute():
             x = torch.FloatTensor(feat_seq[-config.SEQUENCE_LENGTH:]).unsqueeze(0).to(device)
             idx = torch.LongTensor([ticker_to_idx.get(ticker, 0)]).to(device)
             sec = torch.LongTensor([config.TICKER_SECTOR.get(ticker, 12)]).to(device)
-            # Average softmax probabilities across all ensemble members
-            member_probs = [F.softmax(m(x, idx, sec), dim=-1) for m in ensemble_models]
+            # Average softmax probabilities across all ensemble members (primary 5d head)
+            member_probs = [F.softmax(m(x, idx, sec)[0], dim=-1) for m in ensemble_models]
             probs = torch.stack(member_probs).mean(dim=0)
             raw_signals[ticker] = probs.squeeze(0).cpu().tolist()
 

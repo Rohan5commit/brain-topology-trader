@@ -6,8 +6,8 @@ EMBEDDING_DIM = 32
 SECTOR_EMBEDDING_DIM = 8     # v3: learned sector embedding
 NUM_SECTORS = 13             # 0-12 + unknown
 SEQUENCE_LENGTH = 120        # v4: doubled context window
-NUM_FEATURES = 25            # v5: +3 alt-data features (earnings_surprise, short_vol_ratio, pc_ratio)
-INPUT_SIZE = NUM_FEATURES + EMBEDDING_DIM + SECTOR_EMBEDDING_DIM  # 65
+NUM_FEATURES = 29            # v7: +4 (days_since_earnings_norm, daily_range_norm, vix_zscore_252, sector_rel_momentum)
+INPUT_SIZE = NUM_FEATURES + EMBEDDING_DIM + SECTOR_EMBEDDING_DIM  # 69
 
 # Training
 LEARNING_RATE = 1e-4
@@ -16,6 +16,9 @@ WEIGHT_DECAY = 1e-4
 DROPOUT = 0.2
 LABEL_SMOOTHING = 0.1        # kept but overridden by FocalLoss
 FOCAL_GAMMA = 2.0            # focal loss focusing parameter
+MULTITASK_AUX_WEIGHT = 0.3   # weight for 20d auxiliary head loss
+MIXUP_ALPHA = 0.4            # beta distribution alpha/beta for mixup augmentation
+RECENCY_SCALE = 0.0001       # exp recency weight per day (2000→2024 ≈ 2.5× ratio)
 QUARTILE_THRESHOLD = 0.25    # top/bottom 25% → label=1/0, middle 50% skipped
 HISTORICAL_EPOCHS = 60       # v3: 60 epochs, 3 SGDR cycles (10+20+40 but capped)
 SGDR_T0 = 10                 # SGDR first cycle length

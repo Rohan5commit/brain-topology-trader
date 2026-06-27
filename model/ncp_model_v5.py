@@ -69,8 +69,15 @@ class NCPTradingModelV5(nn.Module):
         )
         self.cs_proj_norm = nn.LayerNorm(ncp_output_size)
 
-        # MLP head: ncp_output_size → 2 logits
+        # Primary head: 5d quartile → 2 logits
         self.head = nn.Sequential(
+            nn.Linear(ncp_output_size, 64),
+            nn.GELU(),
+            nn.Dropout(dropout),
+            nn.Linear(64, 2),
+        )
+        # Auxiliary head: 20d quartile (multi-task, shared backbone)
+        self.head_20d = nn.Sequential(
             nn.Linear(ncp_output_size, 64),
             nn.GELU(),
             nn.Dropout(dropout),
@@ -83,7 +90,11 @@ class NCPTradingModelV5(nn.Module):
         stock_idx: torch.Tensor,     # (B,)
         sector_idx: torch.Tensor,    # (B,)
         hx=None,
-    ) -> torch.Tensor:
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """Returns (logits_5d, logits_20d), both (B, 2).
+
+        Callers that only need the primary head can ignore the second element.
+        """
         x = self.feature_norm(x)
         emb = self.dropout(self.embedding(stock_idx))                # (B, E)
         sec = self.dropout(self.sector_embedding(sector_idx))        # (B, S)
@@ -98,9 +109,8 @@ class NCPTradingModelV5(nn.Module):
         context = (output * attn_w).sum(dim=1)                       # (B, ncp_output_size)
 
         # Cross-sectional attention (residual)
-        # Treat batch dim as the "sequence" of stocks attending to each other
         cs_in = self.cs_norm(context).unsqueeze(0)                   # (1, B, D)
         cs_out, _ = self.cs_attn(cs_in, cs_in, cs_in)               # (1, B, D)
         context = self.cs_proj_norm(context + cs_out.squeeze(0))     # (B, D) residual
 
-        return self.head(context)                                    # (B, 2)
+        return self.head(context), self.head_20d(context)           # (B,2), (B,2)
