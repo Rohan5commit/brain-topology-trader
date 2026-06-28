@@ -1,12 +1,9 @@
 #!/usr/bin/env python3
-"""NCP v7 seed 2 — walk-forward + 29 features + multi-task + mixup + recency — OVH H100 cuda:0."""
-import os
-os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:True"
-SEED = 2
-DEVICE_ID = 0
-
-import subprocess, sys
-subprocess.run([sys.executable, "-m", "pip", "install", "-q", "ncps", "yfinance", "pyarrow"], check=True)
+"""NCP v7 seed 2 — convenience wrapper: sets SEED=2 and delegates to train_v7_walkforward.py."""
+import os, subprocess, sys
+os.environ["SEED"] = "2"
+script = os.path.join(os.path.dirname(os.path.abspath(__file__)), "train_v7_walkforward.py")
+sys.exit(subprocess.call([sys.executable, script] + sys.argv[1:]))
 
 import torch as _t
 assert _t.cuda.is_available(), "No CUDA"
