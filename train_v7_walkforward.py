@@ -1,25 +1,39 @@
 #!/usr/bin/env python3
 """NCP v7 — walk-forward + 29 features + multi-task + mixup + recency weights.
 
-Reads SEED env var (default 1) so the same script works for any seed.
-Writes weights to /workspace/btt/ncp_v7_seed{SEED}.pt
+GPU isolation: this model is allocated physical GPUs 2 and 3 on a 4-GPU node.
+  seed 1 → CUDA_VISIBLE_DEVICES=2  (physical GPU 2)
+  seed 2 → CUDA_VISIBLE_DEVICES=3  (physical GPU 3)
+
+CUDA_VISIBLE_DEVICES is set here, before any torch import, so torch never
+sees GPUs 0 or 1. A hard assertion enforces exactly one visible device.
 """
 import os
-os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:True"
+
+# ── GPU isolation — MUST be set before any torch import ──────────────────────
 SEED = int(os.environ.get("SEED", 1))
-DEVICE_ID = 0
+assert SEED in (1, 2), f"SEED must be 1 or 2, got {SEED}"
+_PHYSICAL_GPU = {1: "2", 2: "3"}[SEED]          # seed1→GPU2, seed2→GPU3
+os.environ["CUDA_VISIBLE_DEVICES"] = _PHYSICAL_GPU
+os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:True"
+# ─────────────────────────────────────────────────────────────────────────────
 
 import subprocess, sys
-# Only auto-install when deps are missing (OVH image has torch pre-installed)
 try:
     import ncps, yfinance, pyarrow  # noqa: F401
 except ImportError:
     subprocess.run([sys.executable, "-m", "pip", "install", "-q", "ncps", "yfinance", "pyarrow"], check=True)
 
 import torch as _t
-assert _t.cuda.is_available(), "No CUDA"
-print(f"GPU {DEVICE_ID}: {_t.cuda.get_device_name(DEVICE_ID)}")
+assert _t.cuda.is_available(), "No CUDA visible"
+assert _t.cuda.device_count() == 1, (
+    f"HARD STOP: expected exactly 1 visible GPU (physical {_PHYSICAL_GPU}), "
+    f"got {_t.cuda.device_count()}. Check CUDA_VISIBLE_DEVICES."
+)
+print(f"[NCP v7 seed={SEED}] Using physical GPU {_PHYSICAL_GPU} → cuda:0 ({_t.cuda.get_device_name(0)})")
 del _t
+
+DEVICE_ID = 0   # always 0 after CUDA_VISIBLE_DEVICES remapping
 
 import logging, random
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(name)s — %(message)s")
