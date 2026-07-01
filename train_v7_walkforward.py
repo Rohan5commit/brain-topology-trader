@@ -1,19 +1,20 @@
 #!/usr/bin/env python3
 """NCP v7 — walk-forward + 29 features + multi-task + mixup + recency weights.
 
-GPU isolation: this model is allocated physical GPUs 2 and 3 on a 4-GPU node.
-  seed 1 → CUDA_VISIBLE_DEVICES=2  (physical GPU 2)
-  seed 2 → CUDA_VISIBLE_DEVICES=3  (physical GPU 3)
-
-CUDA_VISIBLE_DEVICES is set here, before any torch import, so torch never
-sees GPUs 0 or 1. A hard assertion enforces exactly one visible device.
+GPU isolation: on multi-GPU nodes (4-GPU), seed1→GPU2 and seed2→GPU3.
+On single-GPU nodes (OVH AI Training h100-1-gpu), CUDA_VISIBLE_DEVICES=0.
+The mapping uses env var SINGLE_GPU=1 to force GPU0 regardless of seed.
 """
 import os
 
 # ── GPU isolation — MUST be set before any torch import ──────────────────────
 SEED = int(os.environ.get("SEED", 1))
 assert SEED in (1, 2), f"SEED must be 1 or 2, got {SEED}"
-_PHYSICAL_GPU = {1: "2", 2: "3"}[SEED]          # seed1→GPU2, seed2→GPU3
+# SINGLE_GPU=1 → force GPU0 (OVH AI Training single-GPU job)
+if os.environ.get("SINGLE_GPU", "0") == "1":
+    _PHYSICAL_GPU = "0"
+else:
+    _PHYSICAL_GPU = {1: "2", 2: "3"}[SEED]       # multi-GPU node: seed1→GPU2, seed2→GPU3
 os.environ["CUDA_VISIBLE_DEVICES"] = _PHYSICAL_GPU
 os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:True"
 # ─────────────────────────────────────────────────────────────────────────────
