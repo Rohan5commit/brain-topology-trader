@@ -30,8 +30,6 @@ _secrets = [
 ]
 
 
-# ── Cron 1: disabled until Alpaca + SMTP are wired ──────────────────────────
-# Re-enable by adding: schedule=modal.Cron("30 17 * * *")
 @app.function(
     image=image,
     secrets=_secrets,
@@ -40,6 +38,7 @@ _secrets = [
     memory=16384,
     gpu="T4",
     timeout=3600,
+    schedule=modal.Cron("30 17 * * *"),
 )
 def run_inference_and_execute():
     """Inference + execution. Manually trigger: modal run modal_app.py::run_inference_and_execute"""
@@ -74,10 +73,15 @@ def run_inference_and_execute():
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
+    # v5 was trained with 22 features; config.NUM_FEATURES is 29 (v7).
+    # Hardcode v5 dims here to avoid mismatch.
+    _V5_NUM_FEATURES = 22
+    _V5_INPUT_SIZE = _V5_NUM_FEATURES + config.EMBEDDING_DIM + config.SECTOR_EMBEDDING_DIM  # 62
+
     _model_kwargs = dict(
         num_stocks=len(config.TICKER_UNIVERSE),
-        num_features=config.NUM_FEATURES,
-        input_size=config.INPUT_SIZE,
+        num_features=_V5_NUM_FEATURES,
+        input_size=_V5_INPUT_SIZE,
         ncp_units=config.NCP_UNITS,
         ncp_output_size=config.NCP_OUTPUT_SIZE,
         ncp_sparsity=config.NCP_SPARSITY,
@@ -118,7 +122,8 @@ def run_inference_and_execute():
         for ticker, feat_seq in features.items():
             if feat_seq is None or len(feat_seq) < config.SEQUENCE_LENGTH:
                 continue
-            x = torch.FloatTensor(feat_seq[-config.SEQUENCE_LENGTH:]).unsqueeze(0).to(device)
+            # Slice to first 22 features — v5 was trained on 22-feature vectors
+            x = torch.FloatTensor(feat_seq[-config.SEQUENCE_LENGTH:, :_V5_NUM_FEATURES]).unsqueeze(0).to(device)
             idx = torch.LongTensor([ticker_to_idx.get(ticker, 0)]).to(device)
             sec = torch.LongTensor([config.TICKER_SECTOR.get(ticker, 12)]).to(device)
             # Average softmax probabilities across all ensemble members (primary 5d head)
@@ -169,14 +174,13 @@ def run_inference_and_execute():
     log.info("Done — %d orders placed", len(orders))
 
 
-# ── Cron 2: disabled until Alpaca + SMTP are wired ──────────────────────────
-# Re-enable by adding: schedule=modal.Cron("0 22 * * *")
 @app.function(
     image=image,
     secrets=_secrets,
     volumes={"/data": vol},
     gpu="A10G",
     timeout=7200,
+    schedule=modal.Cron("0 22 * * *"),
 )
 def update_weights():
     """EOD weight update. Manually trigger: modal run modal_app.py::update_weights"""
