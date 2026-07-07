@@ -45,7 +45,7 @@ class DataIngestor:
 
     # ── OHLCV (Twelve Data) ──────────────────────────────────────────────────
 
-    def _fetch_ohlcv_one(self, ticker: str, outputsize: int = 60) -> pd.DataFrame | None:
+    def _fetch_ohlcv_one(self, ticker: str, outputsize: int = 150) -> pd.DataFrame | None:
         url = "https://api.twelvedata.com/time_series"
         params = {
             "symbol": ticker,
@@ -66,7 +66,7 @@ class DataIngestor:
                 df[col] = pd.to_numeric(df[col], errors="coerce")
         return df
 
-    def fetch_ohlcv_all(self, tickers: list[str], outputsize: int = 60) -> dict[str, pd.DataFrame]:
+    def fetch_ohlcv_all(self, tickers: list[str], outputsize: int = 150) -> dict[str, pd.DataFrame]:
         results: dict[str, pd.DataFrame] = {}
         for i, ticker in enumerate(tickers):
             try:
@@ -75,7 +75,7 @@ class DataIngestor:
                     results[ticker] = df
             except Exception as exc:
                 log.warning("OHLCV fetch failed for %s: %s", ticker, exc)
-            if i % 8 == 7:
+            if i % 8 == 7:  # throttle: 1s pause every 8 tickers across 8 rotating keys
                 time.sleep(1)
         log.info("OHLCV: fetched %d/%d tickers", len(results), len(tickers))
         return results
