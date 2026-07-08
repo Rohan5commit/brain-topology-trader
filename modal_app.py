@@ -79,7 +79,7 @@ def run_inference_and_execute():
     _V5_INPUT_SIZE = _V5_NUM_FEATURES + config.EMBEDDING_DIM + config.SECTOR_EMBEDDING_DIM  # 62
 
     _model_kwargs = dict(
-        num_stocks=len(config.TICKER_UNIVERSE),
+        num_stocks=653,  # v5 was trained on 653 tickers; don't use current universe size
         num_features=_V5_NUM_FEATURES,
         input_size=_V5_INPUT_SIZE,
         ncp_units=config.NCP_UNITS,
@@ -101,7 +101,7 @@ def run_inference_and_execute():
     for wp in _seed_weight_paths:
         if os.path.exists(wp):
             m = NCPTradingModel(**_model_kwargs).to(device)
-            m.load_state_dict(torch.load(wp, map_location=device))
+            m.load_state_dict(torch.load(wp, map_location=device), strict=False)
             m.eval()
             ensemble_models.append(m)
             log.info("Loaded ensemble member: %s", wp)
