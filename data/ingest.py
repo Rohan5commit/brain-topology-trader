@@ -140,20 +140,5 @@ class DataIngestor:
     # ── Sentiment (Finnhub) ──────────────────────────────────────────────────
 
     def fetch_sentiment(self, tickers: list[str]) -> dict[str, float]:
-        scores: dict[str, float] = {}
-        if not self._finnhub_key:
-            return {t: 0.0 for t in tickers}
-        try:
-            import finnhub
-            client = finnhub.Client(api_key=self._finnhub_key)
-            for ticker in tickers:
-                try:
-                    client.company_news(ticker, _from="2020-01-01", to="2099-01-01")
-                    scores[ticker] = 0.0
-                except Exception:
-                    scores[ticker] = 0.0
-                time.sleep(0.05)
-        except Exception as exc:
-            log.warning("Finnhub client error: %s", exc)
-            scores = {t: 0.0 for t in tickers}
-        return scores
+        # Sentiment parsing not yet implemented — return neutral zeros without calling Finnhub
+        return {t: 0.0 for t in tickers}
