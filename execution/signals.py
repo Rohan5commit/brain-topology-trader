@@ -29,7 +29,7 @@ class SignalProcessor:
             history[ticker] = []
             for day in range(config.SIGNAL_SMOOTH_DAYS):
                 col_p = f"day{day}_probs"
-                if col_p in row.index and isinstance(row[col_p], list):
+                if col_p in row.index and isinstance(row[col_p], (list, __import__('numpy').ndarray)):
                     history[ticker].append(row[col_p])
         return history
 
