@@ -82,13 +82,15 @@ class DataIngestor:
 
     def fetch_closing_prices(self, tickers: list[str]) -> dict[str, float]:
         prices: dict[str, float] = {}
-        for ticker in tickers:
+        for i, ticker in enumerate(tickers):
             try:
                 df = self._fetch_ohlcv_one(ticker, outputsize=2)
                 if df is not None and not df.empty:
                     prices[ticker] = float(df["close"].iloc[-1])
             except Exception as exc:
                 log.debug("Close fetch failed %s: %s", ticker, exc)
+            if i % 8 == 7:
+                time.sleep(1)
         return prices
 
     # ── Macro (yfinance — no API key) ────────────────────────────────────────
