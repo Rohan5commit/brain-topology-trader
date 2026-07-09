@@ -117,21 +117,51 @@ def run_inference_and_execute():
 
     ticker_to_idx = {t: i for i, t in enumerate(config.TICKER_UNIVERSE)}
 
+    # Build batched tensors for all eligible tickers — cross-sectional attention
+    # works properly with the full batch rather than per-ticker (batch=1) calls.
+    eligible = [
+        (t, feat_seq)
+        for t, feat_seq in features.items()
+        if feat_seq is not None and len(feat_seq) >= config.SEQUENCE_LENGTH
+    ]
+    log.info("Eligible tickers for inference: %d", len(eligible))
+
     raw_signals: dict[str, list[float]] = {}
+    _BATCH = 64  # process in chunks to stay within GPU memory
     with torch.no_grad():
-        for ticker, feat_seq in features.items():
-            if feat_seq is None or len(feat_seq) < config.SEQUENCE_LENGTH:
-                continue
-            # Slice to first 22 features — v5 was trained on 22-feature vectors
-            x = torch.FloatTensor(feat_seq[-config.SEQUENCE_LENGTH:, :_V5_NUM_FEATURES]).unsqueeze(0).to(device)
-            idx = torch.LongTensor([ticker_to_idx.get(ticker, 0)]).to(device)
-            sec = torch.LongTensor([config.TICKER_SECTOR.get(ticker, 12)]).to(device)
-            # Average softmax probabilities across all ensemble members (primary 5d head)
-            member_probs = [F.softmax(m(x, idx, sec)[0], dim=-1) for m in ensemble_models]
-            probs = torch.stack(member_probs).mean(dim=0)
-            raw_signals[ticker] = probs.squeeze(0).cpu().tolist()
+        for batch_start in range(0, len(eligible), _BATCH):
+            batch = eligible[batch_start: batch_start + _BATCH]
+            xs = torch.stack([
+                torch.FloatTensor(feat_seq[-config.SEQUENCE_LENGTH:, :_V5_NUM_FEATURES])
+                for _, feat_seq in batch
+            ]).to(device)  # (B, T, 22)
+            idxs = torch.LongTensor([ticker_to_idx.get(t, 0) for t, _ in batch]).to(device)
+            secs = torch.LongTensor([config.TICKER_SECTOR.get(t, 12) for t, _ in batch]).to(device)
+            # Average softmax probabilities across ensemble members (primary 5d head)
+            member_probs = [F.softmax(m(xs, idxs, secs)[0], dim=-1) for m in ensemble_models]
+            probs = torch.stack(member_probs).mean(dim=0)  # (B, 2)
+            for i, (ticker, _) in enumerate(batch):
+                raw_signals[ticker] = probs[i].cpu().tolist()
 
     log.info("Inference complete: %d tickers", len(raw_signals))
+
+    # Capture today's closing prices for reward computation in update_weights tonight
+    import pandas as pd
+    today_str = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    prev_closes = {t: float(ohlcv[t]["close"].iloc[-1]) for t in raw_signals if t in ohlcv}
+    snapshot_records = []
+    for ticker, probs in raw_signals.items():
+        snapshot_records.append({
+            "ticker": ticker,
+            "date": today_str,
+            "p_down": probs[0],
+            "p_up": probs[1],
+            "chosen_action": 1 if probs[1] > probs[0] else 0,  # 1=UP, 0=DOWN
+            "prev_close": prev_closes.get(ticker, 0.0),
+        })
+    snapshot_df = pd.DataFrame(snapshot_records).set_index("ticker")
+    snapshot_df.to_parquet(config.DAILY_SNAPSHOT_PATH)
+    log.info("Daily snapshot saved: %d tickers → %s", len(snapshot_records), config.DAILY_SNAPSHOT_PATH)
 
     processor = SignalProcessor()
     smoothed = processor.smooth_and_rank(raw_signals)
@@ -164,7 +194,7 @@ def run_inference_and_execute():
     vol.commit()
 
     send_daily_report({
-        "date": datetime.now(timezone.utc).strftime("%Y-%m-%d"),
+        "date": today_str,
         "tickers_analyzed": len(raw_signals),
         "orders_placed": len(orders),
         "portfolio_value": portfolio_value,
@@ -186,11 +216,12 @@ def update_weights():
     """EOD weight update. Manually trigger: modal run modal_app.py::update_weights"""
     import os
     import torch
+    import pandas as pd
     from datetime import datetime, timezone
 
     import config
     from data.ingest import DataIngestor
-    from model.ncp_model import NCPTradingModel
+    from model.ncp_model_v5 import NCPTradingModelV5
     from model.update import OnlineUpdater
     from reward.compute import RewardComputer
     from utils.logger import get_logger
@@ -198,48 +229,61 @@ def update_weights():
     log = get_logger("weight_update")
     log.info("=== Weight Update start %s ===", datetime.now(timezone.utc).isoformat())
 
-    ingestor = DataIngestor()
-    closing = ingestor.fetch_closing_prices(config.TICKER_UNIVERSE)
-
-    if not os.path.exists(config.SIGNALS_PATH):
-        log.warning("No signals file found — skipping update")
+    if not os.path.exists(config.DAILY_SNAPSHOT_PATH):
+        log.warning("No daily snapshot found — skipping update")
         return
 
-    import pandas as pd
-    signals_df = pd.read_parquet(config.SIGNALS_PATH)
+    snapshot_df = pd.read_parquet(config.DAILY_SNAPSHOT_PATH)
+    log.info("Loaded snapshot: %d tickers from %s", len(snapshot_df), snapshot_df["date"].iloc[0] if "date" in snapshot_df.columns else "?")
+
+    # Fetch today's closing prices (throttled — same keys as inference)
+    ingestor = DataIngestor()
+    closing = ingestor.fetch_closing_prices(config.TICKER_UNIVERSE)
+    log.info("Closing prices fetched: %d tickers", len(closing))
 
     reward_computer = RewardComputer()
-    rewards = reward_computer.compute(signals_df, closing, None,
+    rewards = reward_computer.compute(snapshot_df, closing, None,
                                       alpha=config.ALPHA, beta=config.BETA)
-    log.info("Avg reward: %.4f over %d positions", sum(rewards.values()) / max(len(rewards), 1), len(rewards))
+    log.info("Rewards: %d tickers, avg=%.4f", len(rewards), sum(rewards.values()) / max(len(rewards), 1))
 
-    device = torch.device("cuda")
-    model = NCPTradingModel(
-        num_stocks=len(config.TICKER_UNIVERSE),
-        num_features=config.NUM_FEATURES,
-        input_size=config.INPUT_SIZE,
+    if not rewards:
+        log.warning("No rewards computed — skipping weight update")
+        return
+
+    # Use v5 model to match the inference weights
+    _V5_NUM_FEATURES = 22
+    _V5_INPUT_SIZE = _V5_NUM_FEATURES + config.EMBEDDING_DIM + config.SECTOR_EMBEDDING_DIM
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    model = NCPTradingModelV5(
+        num_stocks=653,
+        num_features=_V5_NUM_FEATURES,
+        input_size=_V5_INPUT_SIZE,
         ncp_units=config.NCP_UNITS,
         ncp_output_size=config.NCP_OUTPUT_SIZE,
         ncp_sparsity=config.NCP_SPARSITY,
         embedding_dim=config.EMBEDDING_DIM,
         num_sectors=config.NUM_SECTORS,
         sector_embedding_dim=config.SECTOR_EMBEDDING_DIM,
+        cs_heads=4,
+        cs_dropout=0.1,
         dropout=0.0,
     ).to(device)
 
-    weights = config.WEIGHTS_LATEST_PATH
-    if not os.path.exists(weights):
-        weights = config.WEIGHTS_BASE_PATH
-    if os.path.exists(weights):
-        model.load_state_dict(torch.load(weights, map_location=device))
+    # Load seed1 as the online-update base (fine-tune in place)
+    seed1_path = "/data/ncp_v5_seed1.pt"
+    online_path = "/data/ncp_v5_online.pt"
+    base = online_path if os.path.exists(online_path) else seed1_path
+    if os.path.exists(base):
+        model.load_state_dict(torch.load(base, map_location=device), strict=False)
+        log.info("Loaded base weights: %s", base)
 
     updater = OnlineUpdater(model, lr=config.LEARNING_RATE)
-    avg_reward = updater.update(signals_df, rewards, device, config.TICKER_UNIVERSE)
-    log.info("Update complete — avg reward: %.4f", avg_reward)
+    avg_reward = updater.update(snapshot_df, rewards, device, config.TICKER_UNIVERSE)
+    log.info("PG update complete — avg reward: %.4f", avg_reward)
 
-    torch.save(model.state_dict(), config.WEIGHTS_LATEST_PATH)
+    torch.save(model.state_dict(), online_path)
     vol.commit()
-    log.info("Weights saved to %s", config.WEIGHTS_LATEST_PATH)
+    log.info("Online weights saved to %s", online_path)
 
 
 @app.function(
