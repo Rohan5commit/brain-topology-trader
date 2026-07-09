@@ -5,7 +5,7 @@ import pandas as pd
 
 log = logging.getLogger(__name__)
 
-BUY, HOLD, SELL = 0, 1, 2
+DOWN, UP = 0, 1   # matches model output and daily_snapshot chosen_action encoding
 
 
 class RewardComputer:
@@ -18,12 +18,12 @@ class RewardComputer:
         beta: float = 0.5,
     ) -> dict[str, float]:
         """
-        For each ticker that had a position today:
-          direction_accuracy = 1 if predicted direction matches actual next-day move, else -1
-          pnl_return = normalized daily PnL on that position
+        For each ticker in the daily snapshot:
+          direction_accuracy = 1 if chosen direction matches next-day move, else -1
+          pnl_return = realized daily return for the chosen direction
           reward = alpha * direction_accuracy + beta * pnl_return
 
-        Returns {ticker: reward}.
+        signals_df columns: p_down, p_up, chosen_action (0=DOWN, 1=UP), prev_close
         """
         rewards: dict[str, float] = {}
 
@@ -33,9 +33,7 @@ class RewardComputer:
         for ticker in signals_df.index:
             try:
                 row = signals_df.loc[ticker]
-                p_buy = float(row.get("p_buy", 0.333))
-                p_sell = float(row.get("p_sell", 0.333))
-                chosen_action = int(row.get("chosen_action", HOLD))
+                chosen_action = int(row.get("chosen_action", UP))
                 prev_close = float(row.get("prev_close", 0.0))
                 curr_close = closing_prices.get(ticker)
 
@@ -44,26 +42,11 @@ class RewardComputer:
 
                 actual_return = (curr_close - prev_close) / prev_close
 
-                # Direction accuracy
-                predicted_up = chosen_action == BUY
+                predicted_up = chosen_action == UP
                 actual_up = actual_return > 0
-                predicted_down = chosen_action == SELL
-                actual_down = actual_return < 0
 
-                if (predicted_up and actual_up) or (predicted_down and actual_down):
-                    direction_acc = 1.0
-                elif chosen_action == HOLD:
-                    direction_acc = 0.0
-                else:
-                    direction_acc = -1.0
-
-                # PnL return (sign-adjusted for short positions)
-                if chosen_action == SELL:
-                    pnl = -actual_return
-                elif chosen_action == BUY:
-                    pnl = actual_return
-                else:
-                    pnl = 0.0
+                direction_acc = 1.0 if (predicted_up == actual_up) else -1.0
+                pnl = actual_return if predicted_up else -actual_return
 
                 reward = alpha * direction_acc + beta * pnl
                 rewards[ticker] = float(reward)
