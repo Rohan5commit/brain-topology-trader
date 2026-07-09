@@ -142,8 +142,8 @@ def run_inference_and_execute():
     broker.close_stale_positions(smoothed, config.SIGNAL_THRESHOLD, config.MIN_HOLD_DAYS)
 
     orders = []
-    longs = [(t, s) for t, s in smoothed.items() if s["score"] > config.SIGNAL_THRESHOLD and s["side"] == "buy"]
-    shorts = [(t, s) for t, s in smoothed.items() if s["score"] < -config.SIGNAL_THRESHOLD and s["side"] == "sell"]
+    longs = [(t, s) for t, s in smoothed.items() if s["confidence"] > config.SIGNAL_THRESHOLD and s["side"] == "buy"]
+    shorts = [(t, s) for t, s in smoothed.items() if s["confidence"] > config.SIGNAL_THRESHOLD and s["side"] == "sell"]
     candidates = sorted(longs, key=lambda x: -x[1]["score"])[:20] + \
                  sorted(shorts, key=lambda x: x[1]["score"])[:20]
 
