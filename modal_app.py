@@ -213,17 +213,19 @@ def run_inference_and_execute():
     schedule=modal.Cron("0 22 * * *"),
 )
 def update_weights():
-    """EOD weight update. Manually trigger: modal run modal_app.py::update_weights"""
+    """EOD weight update — supervised fine-tune on today's actual direction labels.
+    Manually trigger: modal run modal_app.py::update_weights"""
     import os
     import torch
+    import torch.nn as nn
+    import torch.nn.functional as F
     import pandas as pd
     from datetime import datetime, timezone
 
     import config
     from data.ingest import DataIngestor
+    from data.features import FeatureEngineer
     from model.ncp_model_v5 import NCPTradingModelV5
-    from model.update import OnlineUpdater
-    from reward.compute import RewardComputer
     from utils.logger import get_logger
 
     log = get_logger("weight_update")
@@ -234,26 +236,23 @@ def update_weights():
         return
 
     snapshot_df = pd.read_parquet(config.DAILY_SNAPSHOT_PATH)
-    log.info("Loaded snapshot: %d tickers from %s", len(snapshot_df), snapshot_df["date"].iloc[0] if "date" in snapshot_df.columns else "?")
+    log.info("Loaded snapshot: %d tickers from %s", len(snapshot_df),
+             snapshot_df["date"].iloc[0] if "date" in snapshot_df.columns else "?")
 
-    # Fetch today's closing prices (throttled — same keys as inference)
+    # Re-fetch today's OHLCV to get actual closing prices and recompute features
     ingestor = DataIngestor()
-    closing = ingestor.fetch_closing_prices(config.TICKER_UNIVERSE)
-    log.info("Closing prices fetched: %d tickers", len(closing))
+    ohlcv = ingestor.fetch_ohlcv_all(config.TICKER_UNIVERSE, outputsize=155)
+    log.info("OHLCV fetched: %d tickers", len(ohlcv))
 
-    reward_computer = RewardComputer()
-    rewards = reward_computer.compute(snapshot_df, closing, None,
-                                      alpha=config.ALPHA, beta=config.BETA)
-    log.info("Rewards: %d tickers, avg=%.4f", len(rewards), sum(rewards.values()) / max(len(rewards), 1))
+    macro = ingestor.fetch_macro()
+    sentiment = ingestor.fetch_sentiment(config.TICKER_UNIVERSE)
+    engineer = FeatureEngineer()
+    features = engineer.compute_features(ohlcv, macro, sentiment)
 
-    if not rewards:
-        log.warning("No rewards computed — skipping weight update")
-        return
-
-    # Use v5 model to match the inference weights
     _V5_NUM_FEATURES = 22
     _V5_INPUT_SIZE = _V5_NUM_FEATURES + config.EMBEDDING_DIM + config.SECTOR_EMBEDDING_DIM
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
     model = NCPTradingModelV5(
         num_stocks=653,
         num_features=_V5_NUM_FEATURES,
@@ -269,7 +268,6 @@ def update_weights():
         dropout=0.0,
     ).to(device)
 
-    # Load seed1 as the online-update base (fine-tune in place)
     seed1_path = "/data/ncp_v5_seed1.pt"
     online_path = "/data/ncp_v5_online.pt"
     base = online_path if os.path.exists(online_path) else seed1_path
@@ -277,9 +275,56 @@ def update_weights():
         model.load_state_dict(torch.load(base, map_location=device), strict=False)
         log.info("Loaded base weights: %s", base)
 
-    updater = OnlineUpdater(model, lr=config.LEARNING_RATE)
-    avg_reward = updater.update(snapshot_df, rewards, device, config.TICKER_UNIVERSE)
-    log.info("PG update complete — avg reward: %.4f", avg_reward)
+    ticker_to_idx = {t: i for i, t in enumerate(config.TICKER_UNIVERSE)}
+    optimizer = torch.optim.AdamW(model.parameters(), lr=config.LEARNING_RATE, weight_decay=config.WEIGHT_DECAY)
+    criterion = nn.CrossEntropyLoss()
+
+    # Build training samples: for each ticker in snapshot, compute actual next-day direction
+    # prev_close was yesterday's close; today's close is the "next day" outcome
+    samples = []
+    for ticker in snapshot_df.index:
+        row = snapshot_df.loc[ticker]
+        prev_close = float(row.get("prev_close", 0.0))
+        feat_seq = features.get(ticker)
+        if feat_seq is None or len(feat_seq) < config.SEQUENCE_LENGTH + 1:
+            continue
+        curr_close = float(ohlcv[ticker]["close"].iloc[-1]) if ticker in ohlcv else 0.0
+        if prev_close <= 0 or curr_close <= 0:
+            continue
+        actual_up = 1 if curr_close > prev_close else 0
+        samples.append((ticker, feat_seq, actual_up))
+
+    log.info("Training samples: %d", len(samples))
+    if not samples:
+        log.warning("No valid training samples — skipping update")
+        return
+
+    model.train()
+    _BATCH = 64
+    total_loss = 0.0
+    n_batches = 0
+    for batch_start in range(0, len(samples), _BATCH):
+        batch = samples[batch_start: batch_start + _BATCH]
+        xs = torch.stack([
+            torch.FloatTensor(feat_seq[-config.SEQUENCE_LENGTH:, :_V5_NUM_FEATURES])
+            for _, feat_seq, _ in batch
+        ]).to(device)
+        idxs = torch.LongTensor([ticker_to_idx.get(t, 0) for t, _, _ in batch]).to(device)
+        secs = torch.LongTensor([config.TICKER_SECTOR.get(t, 12) for t, _, _ in batch]).to(device)
+        labels = torch.LongTensor([label for _, _, label in batch]).to(device)
+
+        logits, _ = model(xs, idxs, secs)
+        loss = criterion(logits, labels)
+
+        optimizer.zero_grad()
+        loss.backward()
+        torch.nn.utils.clip_grad_norm_(model.parameters(), 0.5)
+        optimizer.step()
+        total_loss += loss.item()
+        n_batches += 1
+
+    avg_loss = total_loss / max(n_batches, 1)
+    log.info("Supervised update: %d samples, %d batches, avg_loss=%.4f", len(samples), n_batches, avg_loss)
 
     torch.save(model.state_dict(), online_path)
     vol.commit()
