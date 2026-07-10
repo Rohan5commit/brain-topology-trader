@@ -93,8 +93,9 @@ def run_inference_and_execute():
         dropout=0.0,
     )
 
+    # Use online weights for seed1 if available (daily fine-tuned), fall back to base seed weights
     _seed_weight_paths = [
-        "/data/ncp_v5_seed1.pt",
+        "/data/ncp_v5_online.pt" if os.path.exists("/data/ncp_v5_online.pt") else "/data/ncp_v5_seed1.pt",
         "/data/ncp_v5_seed2.pt",
     ]
     ensemble_models = []
@@ -163,6 +164,16 @@ def run_inference_and_execute():
     snapshot_df.to_parquet(config.DAILY_SNAPSHOT_PATH)
     log.info("Daily snapshot saved: %d tickers → %s", len(snapshot_records), config.DAILY_SNAPSHOT_PATH)
 
+    # Save feature tensors so update_weights doesn't re-fetch all OHLCV
+    import pickle
+    feat_for_update = {
+        t: feat_seq[-config.SEQUENCE_LENGTH:, :_V5_NUM_FEATURES]
+        for t, feat_seq in eligible
+    }
+    with open(config.DAILY_FEATURES_PATH, "wb") as f:
+        pickle.dump(feat_for_update, f)
+    log.info("Feature tensors saved: %d tickers → %s", len(feat_for_update), config.DAILY_FEATURES_PATH)
+
     processor = SignalProcessor()
     smoothed = processor.smooth_and_rank(raw_signals)
 
@@ -224,7 +235,6 @@ def update_weights():
 
     import config
     from data.ingest import DataIngestor
-    from data.features import FeatureEngineer
     from model.ncp_model_v5 import NCPTradingModelV5
     from utils.logger import get_logger
 
@@ -234,20 +244,23 @@ def update_weights():
     if not os.path.exists(config.DAILY_SNAPSHOT_PATH):
         log.warning("No daily snapshot found — skipping update")
         return
+    if not os.path.exists(config.DAILY_FEATURES_PATH):
+        log.warning("No daily features found — skipping update")
+        return
 
     snapshot_df = pd.read_parquet(config.DAILY_SNAPSHOT_PATH)
     log.info("Loaded snapshot: %d tickers from %s", len(snapshot_df),
              snapshot_df["date"].iloc[0] if "date" in snapshot_df.columns else "?")
 
-    # Re-fetch today's OHLCV to get actual closing prices and recompute features
-    ingestor = DataIngestor()
-    ohlcv = ingestor.fetch_ohlcv_all(config.TICKER_UNIVERSE, outputsize=155)
-    log.info("OHLCV fetched: %d tickers", len(ohlcv))
+    import pickle
+    with open(config.DAILY_FEATURES_PATH, "rb") as f:
+        saved_features = pickle.load(f)
+    log.info("Loaded saved features: %d tickers", len(saved_features))
 
-    macro = ingestor.fetch_macro()
-    sentiment = ingestor.fetch_sentiment(config.TICKER_UNIVERSE)
-    engineer = FeatureEngineer()
-    features = engineer.compute_features(ohlcv, macro, sentiment)
+    # Fetch only closing prices — much faster than full OHLCV re-fetch
+    ingestor = DataIngestor()
+    closing = ingestor.fetch_closing_prices(config.TICKER_UNIVERSE)
+    log.info("Closing prices fetched: %d tickers", len(closing))
 
     _V5_NUM_FEATURES = 22
     _V5_INPUT_SIZE = _V5_NUM_FEATURES + config.EMBEDDING_DIM + config.SECTOR_EMBEDDING_DIM
@@ -279,20 +292,19 @@ def update_weights():
     optimizer = torch.optim.AdamW(model.parameters(), lr=config.LEARNING_RATE, weight_decay=config.WEIGHT_DECAY)
     criterion = nn.CrossEntropyLoss()
 
-    # Build training samples: for each ticker in snapshot, compute actual next-day direction
-    # prev_close was yesterday's close; today's close is the "next day" outcome
+    # Build training samples: prev_close from snapshot, curr_close from today's closing prices
     samples = []
     for ticker in snapshot_df.index:
         row = snapshot_df.loc[ticker]
         prev_close = float(row.get("prev_close", 0.0))
-        feat_seq = features.get(ticker)
-        if feat_seq is None or len(feat_seq) < config.SEQUENCE_LENGTH + 1:
+        feat_arr = saved_features.get(ticker)
+        if feat_arr is None:
             continue
-        curr_close = float(ohlcv[ticker]["close"].iloc[-1]) if ticker in ohlcv else 0.0
+        curr_close = closing.get(ticker, 0.0)
         if prev_close <= 0 or curr_close <= 0:
             continue
         actual_up = 1 if curr_close > prev_close else 0
-        samples.append((ticker, feat_seq, actual_up))
+        samples.append((ticker, feat_arr, actual_up))
 
     log.info("Training samples: %d", len(samples))
     if not samples:
@@ -306,8 +318,8 @@ def update_weights():
     for batch_start in range(0, len(samples), _BATCH):
         batch = samples[batch_start: batch_start + _BATCH]
         xs = torch.stack([
-            torch.FloatTensor(feat_seq[-config.SEQUENCE_LENGTH:, :_V5_NUM_FEATURES])
-            for _, feat_seq, _ in batch
+            torch.FloatTensor(feat_arr)  # already (120, 22) from snapshot
+            for _, feat_arr, _ in batch
         ]).to(device)
         idxs = torch.LongTensor([ticker_to_idx.get(t, 0) for t, _, _ in batch]).to(device)
         secs = torch.LongTensor([config.TICKER_SECTOR.get(t, 12) for t, _, _ in batch]).to(device)
