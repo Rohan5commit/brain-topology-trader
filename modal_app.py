@@ -185,8 +185,8 @@ def run_inference_and_execute():
     orders = []
     longs = [(t, s) for t, s in smoothed.items() if s["confidence"] > config.SIGNAL_THRESHOLD and s["side"] == "buy"]
     shorts = [(t, s) for t, s in smoothed.items() if s["confidence"] > config.SIGNAL_THRESHOLD and s["side"] == "sell"]
-    candidates = sorted(longs, key=lambda x: -x[1]["score"])[:20] + \
-                 sorted(shorts, key=lambda x: x[1]["score"])[:20]
+    candidates = sorted(longs, key=lambda x: -x[1]["score"])[:10] + \
+                 sorted(shorts, key=lambda x: x[1]["score"])[:5]
 
     for ticker, sig in candidates:
         notional = sizer.kelly_notional(
@@ -204,13 +204,18 @@ def run_inference_and_execute():
     processor.save_signals(raw_signals)
     vol.commit()
 
+    filled_longs = [o["ticker"] for o in orders if o["side"] == "buy"]
+    filled_shorts = [o["ticker"] for o in orders if o["side"] == "sell"]
+    log.info("Longs: %s", filled_longs)
+    log.info("Shorts: %s", filled_shorts)
+
     send_daily_report({
         "date": today_str,
         "tickers_analyzed": len(raw_signals),
         "orders_placed": len(orders),
         "portfolio_value": portfolio_value,
-        "top_longs": [t for t, _ in longs[:5]],
-        "top_shorts": [t for t, _ in shorts[:5]],
+        "top_longs": filled_longs or [t for t, _ in longs[:5]],
+        "top_shorts": filled_shorts or [t for t, _ in shorts[:5]],
     })
     log.info("Done — %d orders placed", len(orders))
 
