@@ -38,7 +38,7 @@ _secrets = [
     memory=16384,
     gpu="T4",
     timeout=3600,
-    schedule=modal.Cron("30 17 * * *"),
+    schedule=modal.Cron("30 17 * * 1-5"),
 )
 def run_inference_and_execute():
     """Inference + execution. Manually trigger: modal run modal_app.py::run_inference_and_execute"""
@@ -226,7 +226,7 @@ def run_inference_and_execute():
     volumes={"/data": vol},
     gpu="A10G",
     timeout=7200,
-    schedule=modal.Cron("0 22 * * *"),
+    schedule=modal.Cron("0 22 * * 1-5"),
 )
 def update_weights():
     """EOD weight update — supervised fine-tune on today's actual direction labels.
