@@ -183,8 +183,14 @@ def run_inference_and_execute():
     broker.close_stale_positions(smoothed, config.SIGNAL_THRESHOLD, config.MIN_HOLD_DAYS)
 
     orders = []
+    open_positions = broker.get_open_positions()
     longs = [(t, s) for t, s in smoothed.items() if s["confidence"] > config.SIGNAL_THRESHOLD and s["side"] == "buy"]
-    shorts = [(t, s) for t, s in smoothed.items() if s["confidence"] > config.SIGNAL_THRESHOLD and s["side"] == "sell"]
+    shorts = [
+        (t, s) for t, s in smoothed.items()
+        if s["confidence"] > config.SIGNAL_THRESHOLD
+        and s["side"] == "sell"
+        and t not in open_positions  # skip tickers already held short
+    ]
     candidates = sorted(longs, key=lambda x: -x[1]["score"])[:10] + \
                  sorted(shorts, key=lambda x: x[1]["score"])[:5]
 
