@@ -36,11 +36,26 @@ jobs:
           mkdir -p ~/.ssh
           echo "${{ secrets.LIGHTNING_SSH_PRIVATE_KEY }}" > ~/.ssh/lightning_rsa
           chmod 600 ~/.ssh/lightning_rsa
-          echo "Host ssh.lightning.ai
+          cat >> ~/.ssh/config << 'EOF'
+          Host ssh.lightning.ai
             StrictHostKeyChecking no
             UserKnownHostsFile=/dev/null
             IdentityFile ~/.ssh/lightning_rsa
-            IdentitiesOnly yes" > ~/.ssh/config
+            IdentitiesOnly yes
+          EOF
+
+      - name: Setup Studio environment (venv + packages, idempotent)
+        run: |
+          ssh -i ~/.ssh/lightning_rsa -o StrictHostKeyChecking=no \
+            s_01kxwct4vhkgz2hg55xkcejvb0@ssh.lightning.ai \
+            "set -e
+             VENV=/teamspace/studios/this_studio/venv
+             if [ ! -f \"\$VENV/bin/python\" ]; then
+               sudo apt-get install -y python3-venv python3-pip -qq
+               python3 -m venv \$VENV
+               \$VENV/bin/pip install -q torch ncps alpaca-py pandas numpy requests pyarrow scikit-learn yfinance finnhub-python
+             fi
+             echo ENV_OK"
 
       - name: Sync repo to Studio
         run: |
@@ -58,7 +73,6 @@ jobs:
           ssh -i ~/.ssh/lightning_rsa -o StrictHostKeyChecking=no \
             s_01kxwct4vhkgz2hg55xkcejvb0@ssh.lightning.ai \
             "cd /teamspace/studios/this_studio/brain-topology-trader && \
-             pip install -q torch ncps alpaca-py pandas numpy finnhub-python requests pyarrow scikit-learn yfinance 2>/dev/null && \
              ALPACA_API_KEY='${{ secrets.ALPACA_API_KEY }}' \
              ALPACA_SECRET_KEY='${{ secrets.ALPACA_SECRET_KEY }}' \
              ALPACA_BASE_URL='${{ secrets.ALPACA_BASE_URL }}' \
@@ -77,7 +91,7 @@ jobs:
              SMTP_PORT='${{ secrets.SMTP_PORT }}' \
              NOTIFY_EMAIL='${{ secrets.NOTIFY_EMAIL }}' \
              DATA_DIR='/teamspace/studios/this_studio/data' \
-             python run_inference.py"
+             /teamspace/studios/this_studio/venv/bin/python run_inference.py"
 
       - name: Stop Studio
         if: always()
