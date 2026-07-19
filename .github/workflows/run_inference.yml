@@ -15,7 +15,7 @@ jobs:
 
       - name: Install Lightning CLI
         run: |
-          pip install lightning
+          pip install lightning-sdk
           echo "$HOME/.local/bin" >> $GITHUB_PATH
 
       - name: Start Studio on free CPU machine
