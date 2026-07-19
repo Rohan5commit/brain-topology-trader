@@ -1,0 +1,83 @@
+name: Daily Inference + Trade Execution
+
+on:
+  schedule:
+    - cron: "30 17 * * 1-5"   # 17:30 UTC = 11:00 PM IST, Mon-Fri
+  workflow_dispatch:
+
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+
+      - name: Install Lightning CLI
+        run: pip install lightning
+
+      - name: Start Studio on free CPU machine
+        env:
+          LIGHTNING_USER_ID: ${{ secrets.LIGHTNING_USER_ID }}
+          LIGHTNING_API_KEY: ${{ secrets.LIGHTNING_API_KEY }}
+        run: |
+          lightning studios start \
+            --name brain-topology-trader \
+            --teamspace juy595711-org/deploy-model-project \
+            --machine CPU
+
+      - name: Wait for Studio to be ready
+        run: sleep 45
+
+      - name: Setup SSH key
+        run: |
+          mkdir -p ~/.ssh
+          echo "${{ secrets.LIGHTNING_SSH_PRIVATE_KEY }}" > ~/.ssh/lightning_rsa
+          chmod 600 ~/.ssh/lightning_rsa
+          echo "Host ssh.lightning.ai
+            StrictHostKeyChecking no
+            UserKnownHostsFile=/dev/null
+            IdentityFile ~/.ssh/lightning_rsa
+            IdentitiesOnly yes" > ~/.ssh/config
+
+      - name: Sync repo to Studio
+        run: |
+          rsync -az --exclude='.git' --exclude='__pycache__' --exclude='*.pyc' \
+            -e "ssh -i ~/.ssh/lightning_rsa -o StrictHostKeyChecking=no" \
+            ./ s_01kxwct4vhkgz2hg55xkcejvb0@ssh.lightning.ai:/teamspace/studios/this_studio/
+
+      - name: Run inference
+        run: |
+          ssh -i ~/.ssh/lightning_rsa -o StrictHostKeyChecking=no \
+            s_01kxwct4vhkgz2hg55xkcejvb0@ssh.lightning.ai \
+            "cd /teamspace/studios/this_studio && \
+             pip install -q torch ncps alpaca-py pandas numpy finnhub-python requests pyarrow scikit-learn yfinance 2>/dev/null && \
+             ALPACA_API_KEY='${{ secrets.ALPACA_API_KEY }}' \
+             ALPACA_SECRET_KEY='${{ secrets.ALPACA_SECRET_KEY }}' \
+             ALPACA_BASE_URL='${{ secrets.ALPACA_BASE_URL }}' \
+             TWELVE_DATA_KEY_1='${{ secrets.TWELVE_DATA_KEY_1 }}' \
+             TWELVE_DATA_KEY_2='${{ secrets.TWELVE_DATA_KEY_2 }}' \
+             TWELVE_DATA_KEY_3='${{ secrets.TWELVE_DATA_KEY_3 }}' \
+             TWELVE_DATA_KEY_4='${{ secrets.TWELVE_DATA_KEY_4 }}' \
+             TWELVE_DATA_KEY_5='${{ secrets.TWELVE_DATA_KEY_5 }}' \
+             TWELVE_DATA_KEY_6='${{ secrets.TWELVE_DATA_KEY_6 }}' \
+             TWELVE_DATA_KEY_7='${{ secrets.TWELVE_DATA_KEY_7 }}' \
+             TWELVE_DATA_KEY_8='${{ secrets.TWELVE_DATA_KEY_8 }}' \
+             FINNHUB_API_KEY='${{ secrets.FINNHUB_API_KEY }}' \
+             SMTP_USER='${{ secrets.SMTP_USER }}' \
+             SMTP_PASS='${{ secrets.SMTP_PASS }}' \
+             SMTP_HOST='${{ secrets.SMTP_HOST }}' \
+             SMTP_PORT='${{ secrets.SMTP_PORT }}' \
+             NOTIFY_EMAIL='${{ secrets.NOTIFY_EMAIL }}' \
+             DATA_DIR='/teamspace/studios/this_studio/data' \
+             python run_inference.py"
+
+      - name: Stop Studio
+        if: always()
+        env:
+          LIGHTNING_USER_ID: ${{ secrets.LIGHTNING_USER_ID }}
+          LIGHTNING_API_KEY: ${{ secrets.LIGHTNING_API_KEY }}
+        run: |
+          lightning studios stop \
+            --name brain-topology-trader \
+            --teamspace juy595711-org/deploy-model-project
