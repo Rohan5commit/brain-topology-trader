@@ -1,5 +1,6 @@
 """Alpaca Paper Trading client — place and manage orders."""
 import logging
+import math
 import os
 import time
 from datetime import date, datetime, timedelta, timezone
@@ -13,13 +14,32 @@ log = logging.getLogger(__name__)
 _RETRY = 3
 _WAIT = 2
 
+# Alpaca 4xx codes that are permanent — don't retry
+_NO_RETRY_CODES = {
+    40310000,  # insufficient buying power
+    40310001,  # insufficient qty
+    42210000,  # fractional short sell
+    40410000,  # symbol not found
+    42110000,  # market closed
+}
+
+
+def _is_permanent(exc: Exception) -> bool:
+    msg = str(exc)
+    try:
+        import json
+        body = json.loads(msg)
+        return body.get("code") in _NO_RETRY_CODES
+    except Exception:
+        return False
+
 
 def _retry(fn, *args, **kwargs):
     for attempt in range(_RETRY):
         try:
             return fn(*args, **kwargs)
         except Exception as exc:
-            if attempt == _RETRY - 1:
+            if attempt == _RETRY - 1 or _is_permanent(exc):
                 raise
             log.warning("Alpaca call failed (%s) — retry %d/%d", exc, attempt + 1, _RETRY)
             time.sleep(_WAIT * (attempt + 1))
@@ -134,7 +154,6 @@ class AlpacaBroker:
             if not price or price <= 0:
                 log.warning("Skipping short %s — could not get price", ticker)
                 return None
-            import math
             qty = math.floor(notional / price)
             if qty < 1:
                 log.warning("Skipping short %s — qty=0 at price=%.2f notional=%.0f", ticker, price, notional)
@@ -163,9 +182,8 @@ class AlpacaBroker:
 
     def _save_positions(self) -> None:
         positions = self.get_open_positions()
-        if not positions:
-            return
         records = [{"ticker": t, **v} for t, v in positions.items()]
+        # Always write (even empty) so stale entry dates don't persist after positions close
         pd.DataFrame(records).to_parquet(config.POSITIONS_PATH, index=False)
 
     def _record_entry(self, ticker: str, side: str) -> None:

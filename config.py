@@ -6,8 +6,8 @@ EMBEDDING_DIM = 32
 SECTOR_EMBEDDING_DIM = 8     # v3: learned sector embedding
 NUM_SECTORS = 13             # 0-12 + unknown
 SEQUENCE_LENGTH = 120        # v4: doubled context window
-NUM_FEATURES = 29            # v7: +4 (days_since_earnings_norm, daily_range_norm, vix_zscore_252, sector_rel_momentum)
-INPUT_SIZE = NUM_FEATURES + EMBEDDING_DIM + SECTOR_EMBEDDING_DIM  # 69
+NUM_FEATURES = 22            # v5 feature set
+INPUT_SIZE = NUM_FEATURES + EMBEDDING_DIM + SECTOR_EMBEDDING_DIM  # 62
 
 # Training
 LEARNING_RATE = 1e-4

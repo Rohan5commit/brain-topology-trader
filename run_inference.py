@@ -151,7 +151,12 @@ broker.close_stale_positions(smoothed, config.SIGNAL_THRESHOLD, config.MIN_HOLD_
 
 orders = []
 open_positions = broker.get_open_positions()
-longs = [(t, s) for t, s in smoothed.items() if s["confidence"] > config.SIGNAL_THRESHOLD and s["side"] == "buy"]
+longs = [
+    (t, s) for t, s in smoothed.items()
+    if s["confidence"] > config.SIGNAL_THRESHOLD
+    and s["side"] == "buy"
+    and t not in open_positions
+]
 shorts = [
     (t, s) for t, s in smoothed.items()
     if s["confidence"] > config.SIGNAL_THRESHOLD
