@@ -68,7 +68,7 @@ online_path = os.path.join(DATA_DIR, "ncp_v5_online.pt")
 seed1_path = os.path.join(WEIGHTS_DIR, "ncp_v5_seed1.pt")
 base = online_path if os.path.exists(online_path) else seed1_path
 if os.path.exists(base):
-    model.load_state_dict(torch.load(base, map_location=device), strict=False)
+    model.load_state_dict(torch.load(base, map_location=device, weights_only=False), strict=False)
     log.info("Loaded base weights: %s", base)
 
 ticker_to_idx = {t: i for i, t in enumerate(config.TICKER_UNIVERSE)}
