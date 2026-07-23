@@ -41,7 +41,7 @@ sentiment = ingestor.fetch_sentiment(config.TICKER_UNIVERSE)
 log.info("Data fetched: %d tickers OHLCV", len(ohlcv))
 
 engineer = FeatureEngineer()
-features = engineer.compute_features(ohlcv, macro, sentiment)
+features = engineer.compute_features(ohlcv, macro, sentiment, ticker_sector=config.TICKER_SECTOR)
 log.info("Features ready for %d tickers", len(features))
 
 device = torch.device("cpu")
@@ -76,7 +76,7 @@ ensemble_models = []
 for wp in _seed_weight_paths:
     if os.path.exists(wp):
         m = NCPTradingModel(**_model_kwargs).to(device)
-        m.load_state_dict(torch.load(wp, map_location=device), strict=False)
+        m.load_state_dict(torch.load(wp, map_location=device, weights_only=False), strict=False)
         m.eval()
         ensemble_models.append(m)
         log.info("Loaded ensemble member: %s", wp)
